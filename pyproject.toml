@@ -1,0 +1,71 @@
+[project]
+name = "adam-fo"
+dynamic = ["version"]
+description = "Wrapper for Bill Gray's fo, the programmatic version of find_orb"
+authors = [
+    {name = "Alec Koumjian", email = "alec@b612foundation.org"},
+]
+dependencies = ["adam-core>=0.3.4"]
+requires-python = "<3.13,>=3.11"
+readme = "README.md"
+license = {text = "GPL-3.0"}
+
+[project.scripts]
+build-fo = "adam_fo.build:main"
+
+[project.optional-dependencies]
+test = [
+    "black>=24.10.0",
+    "ruff>=0.9.2",
+    "isort>=5.13.2",
+    "mypy>=1.14.1",
+    "pytest>=8.3.4",
+]
+dev = [
+    "adam-core @ file:///${PROJECT_ROOT}/../adam-core",
+]
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.build]
+includes = ["src/adam_fo/build_fo.sh"]
+package-dir = "src"
+source-includes = ["tests", "README.md"]
+
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+lint.ignore = []
+exclude = ["build"]
+
+[tool.pdm.version]
+source = "scm"
+write_to = "adam_core/_version.py"
+write_template = "__version__ = '{}'"
+
+
+[tool.pdm.scripts]
+check = { composite = ["lint", "typecheck", "test"] }
+format = { composite = ["black ./src/adam_fo", "isort ./src/adam_fo"] }
+lint = { composite = [
+  "ruff check ./src/adam_fo",
+  "black --check ./src/adam_fo",
+  "isort --check-only ./src/adam_fo",
+] }
+fix = "ruff check ./src/adam_fo --fix"
+typecheck = "mypy --strict ./src/adam_fo"
+
+test = "pytest {args}"
+doctest = "pytest --doctest-plus --doctest-only"
+coverage = "pytest --cov=adam_fo --cov-report=xml {args}"

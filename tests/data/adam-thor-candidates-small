@@ -1,0 +1,111 @@
+# version=2022
+# observatory
+! mpcCode 695
+! name Kitt Peak National Observatory - Mayall + Mosaic3
+# submitter
+! name J. Moeyens
+! institution B612 Asteroid Institute
+# observers
+! name M. L. Survey
+# measurers
+! name J. Moeyens
+! name M. Juric
+! name S. Nelson
+! name A. Koumjian
+! name K. Kiker
+! name N. Tellis
+! name D. Veronese-Milin
+! name A. Posner
+! name E. Lu
+! name C. Fiaschetti
+! name D. Remy
+# telescope
+! name Mayall 4m
+! design Reflector
+! aperture 4.0
+! detector CCD
+# software
+! objectDetection Asteroid Discovery Analysis and Mapping + Tracklet-less Heliocentric Orbit Recovery (ADAM::THOR)
+# fundingSource WilliamBowes, McGregorGirand, Tito's Vodka, PRawls, SKraus, Yishan/KWong, SGalitsky, Google
+# comment
+! line Discovery candidates found by members of the Asteroid Institute, a program of B612 Foundation,
+! line using the institute's ADAM::THOR discovery service running on Google Cloud.
+trkSub|obsSubID|obsTime|ra|dec|rmsRA|rmsDec|mag|rmsMag|band|stn|mode|astCat
+t5b949d|k4m.3100135.4.1725|2016-11-10T05:53:50.053Z|41.85291854|-0.97431979|0.2788|0.2790|20.98|0.14|z|695|CCD|Gaia2
+# observatory
+! mpcCode V00
+! name Kitt Peak National Observatory - Bok + 90Prime
+# submitter
+! name J. Moeyens
+! institution B612 Asteroid Institute
+# observers
+! name B. A. S. Survey
+# measurers
+! name J. Moeyens
+! name M. Juric
+! name S. Nelson
+! name A. Koumjian
+! name K. Kiker
+! name N. Tellis
+! name D. Veronese-Milin
+! name A. Posner
+! name E. Lu
+! name C. Fiaschetti
+! name D. Remy
+# telescope
+! name Bok 2.3m
+! design Reflector
+! aperture 2.3
+! detector CCD
+# software
+! objectDetection Asteroid Discovery Analysis and Mapping + Tracklet-less Heliocentric Orbit Recovery (ADAM::THOR)
+# fundingSource WilliamBowes, McGregorGirand, Tito's Vodka, PRawls, SKraus, Yishan/KWong, SGalitsky, Google
+# comment
+! line Discovery candidates found by members of the Asteroid Institute, a program of B612 Foundation,
+! line using the institute's ADAM::THOR discovery service running on Google Cloud.
+trkSub|obsSubID|obsTime|ra|dec|rmsRA|rmsDec|mag|rmsMag|band|stn|mode|astCat
+t41f9bb|ksb.76990083.3.2527|2016-11-07T05:59:27.590Z|38.78045520|1.46749074|0.2200|0.2202|21.72|0.17|r|V00|CCD|Gaia2
+t41f9bb|ksb.76990117.1.4662|2016-11-07T08:29:18.985Z|38.76054234|1.46029550|0.2662|0.2671|21.87|0.19|r|V00|CCD|Gaia2
+t41f9bb|ksb.76990129.4.5035|2016-11-07T09:21:52.445Z|38.75356112|1.45782857|0.2613|0.2617|21.78|0.21|r|V00|CCD|Gaia2
+# observatory
+! mpcCode V00
+! name Kitt Peak National Observatory - Bok + 90Prime
+# submitter
+! name J. Moeyens
+! institution B612 Asteroid Institute
+# observers
+! name B. A. S. Survey
+# measurers
+! name J. Moeyens
+! name M. Juric
+! name S. Nelson
+! name A. Koumjian
+! name K. Kiker
+! name N. Tellis
+! name D. Veronese-Milin
+! name A. Posner
+! name E. Lu
+! name C. Fiaschetti
+! name D. Remy
+# telescope
+! name Bok 2.3m
+! design Reflector
+! aperture 2.3
+! detector CCD
+# software
+! objectDetection Asteroid Discovery Analysis and Mapping + Tracklet-less Heliocentric Orbit Recovery (ADAM::THOR)
+# fundingSource WilliamBowes, McGregorGirand, Tito's Vodka, PRawls, SKraus, Yishan/KWong, SGalitsky, Google
+# comment
+! line Discovery candidates found by members of the Asteroid Institute, a program of B612 Foundation,
+! line using the institute's ADAM::THOR discovery service running on Google Cloud.
+trkSub|obsSubID|obsTime|ra|dec|rmsRA|rmsDec|mag|rmsMag|band|stn|mode|astCat
+t41f9bb|c4d.589361.24.323|2016-11-04T04:28:06.947Z|39.35124872|1.69015785|0.0850|0.0879|22.26|0.09|g|W84|CCD|Gaia2
+t41f9bb|c4d.589362.24.474|2016-11-04T04:30:05.110Z|39.35095787|1.69005324|0.0451|0.0454|21.90|0.05|r|W84|CCD|Gaia2
+t41f9bb|c4d.589363.24.491|2016-11-04T04:32:05.516Z|39.35069601|1.68994316|0.0570|0.0571|21.86|0.07|i|W84|CCD|Gaia2
+t41f9bb|c4d.590623.55.1147|2016-11-07T04:16:08.512Z|38.79350206|1.47367740|0.0663|0.0674|21.87|0.08|i|W84|CCD|Gaia2
+t41f9bb|c4d.590624.55.936|2016-11-07T04:18:06.916Z|38.79321250|1.47359267|0.1587|0.1588|21.91|0.17|z|W84|CCD|Gaia2
+t41f9bb|c4d.590625.55.1046|2016-11-07T04:20:05.844Z|38.79294171|1.47347410|0.0850|0.0855|21.95|0.09|r|W84|CCD|Gaia2
+t41f9bb|c4d.591817.22.670|2016-11-10T03:55:52.953Z|38.24484060|1.27719768|0.1052|0.1054|22.17|0.15|z|W84|CCD|Gaia2
+t41f9bb|c4d.591819.41.939|2016-11-10T03:59:07.284Z|38.24439020|1.27704359|0.1223|0.1224|22.14|0.19|z|W84|CCD|Gaia2
+t41f9bb|c4d.596127.8.270|2016-11-25T02:49:16.206Z|35.79268990|0.63334788|0.1384|0.1384|22.07|0.20|z|W84|CCD|Gaia2
+t41f9bb|c4d.600481.46.627|2016-12-07T02:06:47.463Z|34.43697383|0.56762498|0.2254|0.2254|21.75|0.13|i|W84|CCD|Gaia2
