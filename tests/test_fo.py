@@ -17,4 +17,4 @@ def test_fo(sample_ades_string):
     orbits, rejected_obs, errors = fo(sample_ades_string)
     assert len(orbits) == 1
     assert len(rejected_obs) == 1
-    assert len(errors) == 0
+    assert errors is None
