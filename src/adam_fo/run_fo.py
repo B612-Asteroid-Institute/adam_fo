@@ -22,7 +22,7 @@ logger.setLevel(os.environ.get("ADAM_LOG_LEVEL", "INFO"))
 def _populate_fo_directory(working_dir: str) -> str:
     """Populate a working directory with required find_orb files."""
     config.check_build_exists()
-    
+
     os.makedirs(working_dir, exist_ok=True)
     # List of required files to copy from FO_DIR to current directory
     required_files = [
@@ -98,6 +98,7 @@ def _de440t_exists():
 def fo(
     ades_string: str,
     clean_up: bool = True,
+    out_dir: Optional[str] = None,
 ) -> Tuple[Orbits, ADESObservations, Optional[str]]:
     """Run programmatic Find_Orb orbit determination
 
@@ -107,6 +108,9 @@ def fo(
         ADES file as a string
     clean_up : bool, optional
         Whether to clean up the temporary directory after running Find_Orb
+    out_dir : Optional[str], optional
+        If provided, the temporary directory will be copied to this path after running Find_Orb.
+        The bc405.dat and DE440t files will not be copied.
 
     Returns
     -------
@@ -119,6 +123,9 @@ def fo(
 
     _de440t_exists()
     fo_tmp_dir = _create_fo_tmp_directory()
+
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     # Create input file
     input_file = os.path.join(fo_tmp_dir, "observations.ades")
@@ -169,6 +176,14 @@ def fo(
 
     orbit = fo_to_adam_orbit_cov(fo_tmp_dir)
     rejected = rejected_observations_from_fo(fo_tmp_dir)
+
+    if out_dir:
+        shutil.copytree(
+            fo_tmp_dir,
+            out_dir,
+            ignore=shutil.ignore_patterns("bc405.dat", "linux_p1550p2650.440t"),
+            dirs_exist_ok=True,
+        )
 
     if clean_up:
         shutil.rmtree(fo_tmp_dir)
