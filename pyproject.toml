@@ -5,7 +5,7 @@ description = "Wrapper for Bill Gray's fo, the programmatic version of find_orb"
 authors = [
     {name = "Alec Koumjian", email = "alec@b612foundation.org"},
 ]
-dependencies = ["adam-core>=0.3.4"]
+dependencies = []
 requires-python = "<3.13,>=3.11"
 readme = "README.md"
 license = {text = "GPL-3.0"}
@@ -21,9 +21,6 @@ test = [
     "mypy>=1.14.1",
     "pytest>=8.3.4",
 ]
-dev = [
-    "adam-core @ file:///${PROJECT_ROOT}/../adam-core",
-]
 [build-system]
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
@@ -32,9 +29,8 @@ build-backend = "pdm.backend"
 distribution = true
 
 [tool.pdm.build]
-includes = ["src/adam_fo/build_fo.sh"]
-package-dir = "src"
-source-includes = ["tests", "README.md"]
+includes = ["src/adam_fo/", "src/adam_fo/build_fo.sh"]
+
 
 
 [tool.black]
@@ -51,7 +47,7 @@ exclude = ["build"]
 
 [tool.pdm.version]
 source = "scm"
-write_to = "adam_core/_version.py"
+write_to = "adam_fo/_version.py"
 write_template = "__version__ = '{}'"
 
 
