@@ -1,5 +1,3 @@
-# TODO: Update this to work inside this new repo instead of the adam_impact_study
-
 import logging
 import os
 import pathlib

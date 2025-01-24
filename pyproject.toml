@@ -6,7 +6,7 @@ authors = [
     {name = "Alec Koumjian", email = "alec@b612foundation.org"},
 ]
 dependencies = [
-  "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core@ee57577ff786c573c856d591b1e993d1649576f3",
+  "adam-core>=0.3.6",
 ]
 requires-python = "<3.13,>=3.11"
 readme = "README.md"
