@@ -106,24 +106,10 @@ def main():
     
     # Process the output line by line to show progress
     for line in result.stdout.splitlines():
-        if "Cloning" in line:
-            output.info(line)
-        elif "Building" in line:
-            output.indent_level = 1
-            output.info(line)
-        elif "Installing" in line:
-            output.header(line)
-        elif "Error" in line or "error" in line.lower():
-            output.error(line)
-            if result.returncode != 0:
-                sys.exit(1)
-        elif "Warning" in line or "warning" in line.lower():
-            output.warning(line)
-        elif "complete" in line.lower():
-            output.success(line)
+        output.info(line)
     
     if result.returncode != 0:
-        output.error("Build failed!")
+        output.error(f"Build failed with error code {result.returncode}")
         if result.stderr:
             output.error(result.stderr)
         sys.exit(1)
