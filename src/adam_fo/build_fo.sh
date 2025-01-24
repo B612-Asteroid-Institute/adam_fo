@@ -33,18 +33,23 @@ clone_repo "jpl_eph" "0c2782e86e42df69a55c2b2db0b72a40312c79c0"
 clone_repo "find_orb" "f574af87ed11f5ec5b69ef8125e8b539de6d6645"
 clone_repo "miscell" "f4565afdf9d0324e798527f837e0814f8de0abe0"
 
-# Build and install components
+# Build and install components in correct dependency order
+echo "Building lunar base first..."
+cd lunar
+make liblunar.a  # Only build the library first, skip integrat
+make install
+cd ..
+
 echo "Building jpl_eph..."
 cd jpl_eph
 make libjpl.a
 make install
 cd ..
 
-echo "Building lunar..."
+echo "Building lunar integrat..."
 cd lunar
-make
-make integrat
-make install
+make integrat  # Now build integrat after jpl_eph is installed
+make install   # Install again to ensure integrat is installed
 cd ..
 
 echo "Building sat_code..."
