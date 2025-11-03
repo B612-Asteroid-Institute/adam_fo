@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import pyarrow.compute as pc
 from adam_core.observations.ades import ADESObservations
 from adam_core.orbits import Orbits
+from adam_core.time import Timestamp
 
 from . import config
 from .conversions import fo_to_adam_orbit_cov, rejected_observations_from_fo
@@ -98,6 +99,7 @@ def fo(
     clean_up: bool = True,
     out_dir: Optional[str] = None,
     temp_dir: Optional[str] = None,
+    elements_epoch: Optional[Timestamp] = None,
 ) -> Tuple[Orbits, ADESObservations, Optional[str]]:
     """Run programmatic Find_Orb orbit determination
 
@@ -115,6 +117,10 @@ def fo(
         If not provided, the default temporary directory in ~/.cache/adam_fo/ will be used. 
         It may be useful to explicitly set the path in HPC use cases, where user directories 
         often have stricter disk usage quotas.
+    elements_epoch : Optional[Timestamp], optional
+        If provided, must contain exactly one row; it will be converted to TT JD
+        and passed to Find_Orb's `-tE` (as `jd<value>`). If omitted, no `-tE`
+        is provided and Find_Orb defaults are used.
 
     Returns
     -------
@@ -142,6 +148,14 @@ def fo(
     fo_debug_level = 2
     if current_log_level < 10:
         fo_debug_level = 10
+    # Resolve elements epoch
+    epoch_arg: Optional[str] = None
+    if elements_epoch is not None:
+        if len(elements_epoch) != 1:
+            raise ValueError("elements_epoch Timestamp must contain exactly one row")
+        jd_value = elements_epoch.rescale("tt").jd().to_pylist()[0]
+        epoch_arg = f"jd{jd_value:.10f}"
+
     # Run Find_Orb
     fo_command = (
         f"{config.FO_BINARY_DIR}/fo {input_file} -c "
@@ -149,6 +163,15 @@ def fo(
         f"-D {fo_tmp_dir}/environ.dat "
         f"-O {fo_tmp_dir}"
     )
+    if epoch_arg:
+        epoch_val = epoch_arg
+        # Quote if it contains whitespace and isn't already quoted
+        if any(ch.isspace() for ch in epoch_val) and not (
+            (epoch_val.startswith('"') and epoch_val.endswith('"'))
+            or (epoch_val.startswith("'") and epoch_val.endswith("'"))
+        ):
+            epoch_val = f'"{epoch_val}"'
+        fo_command = f"{fo_command} -tE {epoch_val}"
 
     logger.debug(f"fo command: {fo_command}")
 
