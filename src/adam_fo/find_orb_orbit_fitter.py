@@ -1,12 +1,13 @@
 import json
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 from mpc_obscodes import mpc_obscodes
 
+from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observations.ades import (
     ADES_to_string,
     ADESObservations,
@@ -19,8 +20,10 @@ from adam_core.orbit_determination.evaluate import (
     FittedOrbitMembers,
     FittedOrbits,
     OrbitDeterminationObservations,
+    evaluate_orbits,
 )
 from adam_core.orbit_determination.orbit_fitter import OrbitFitter
+from adam_core.propagator.propagator import Propagator
 
 try:
     from adam_fo import fo
@@ -28,6 +31,19 @@ except ImportError:
     raise ImportError("Please install adam_fo to use this feature.")
 
 logger = logging.getLogger(__name__)
+
+
+class _TwoBodyPropagator(Propagator):
+    """Default propagator used to evaluate hold-in chi2 when none is supplied."""
+
+    def _propagate_orbits(self, orbits, times, max_iter=1000, tol=1e-14, **kwargs):
+        return propagate_2body(orbits, times, max_iter=max_iter, tol=tol)
+
+    def __getstate__(self):
+        return self.__dict__.copy()
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
 
 class FindOrbOrbitFitter(OrbitFitter):
@@ -38,6 +54,7 @@ class FindOrbOrbitFitter(OrbitFitter):
         *args: object,  # Generic type for arbitrary positional arguments
         fo_result_dir: str,
         clean_up_fo_dir: bool = True,
+        propagator: Optional[Propagator] = None,
         **kwargs: object,  # Generic type for arbitrary keyword arguments
     ) -> None:
         """
@@ -47,10 +64,16 @@ class FindOrbOrbitFitter(OrbitFitter):
            directory to use to store FindOrb's inputs and outputs
         clean_up_fo_dir: bool, default True
            whether to clean up the contents of fo_result_dir after a run
+        propagator: Propagator, optional
+           Propagator used to evaluate the converged orbit so the returned
+           ``FittedOrbits`` table has reduced_chi2 populated. Defaults to a
+           2-body propagator. Production callers (LOOO pipeline) should pass
+           the same propagator used downstream so chi2 is consistent.
         """
         super().__init__(*args, **kwargs)
         self.fo_result_dir = fo_result_dir
         self.clean_up_fo_dir = clean_up_fo_dir
+        self.propagator = propagator if propagator is not None else _TwoBodyPropagator()
         self._load_obscodes()
 
     def _load_obscodes(self):
@@ -232,6 +255,13 @@ class FindOrbOrbitFitter(OrbitFitter):
         object_id: str | pa.LargeStringScalar,
         observations: OrbitDeterminationObservations,
     ) -> Tuple[FittedOrbits, FittedOrbitMembers]:
+        """Fit an initial orbit for a single object via Find_Orb.
+
+        Returns a real ``FittedOrbits`` table with ``reduced_chi2`` populated by
+        evaluating the converged orbit against the input observations and
+        ``success`` set to True. Outliers in ``FittedOrbitMembers`` reflect the
+        observations that Find_Orb rejected; residuals on members are not set.
+        """
         if observations is None or len(observations) == 0:
             logger.error(f"No observation provided for object {object_id}")
             return FittedOrbits.empty(), FittedOrbitMembers.empty()
@@ -261,4 +291,21 @@ class FindOrbOrbitFitter(OrbitFitter):
         fitted_members = self._rejected_observations_to_fitted_members(
             observations, rejected, orbit_id
         )
-        return orbit, fitted_members
+
+        # Evaluate the converged orbit so the returned FittedOrbits has
+        # reduced_chi2 populated. Mirrors the pattern in
+        # adam_core.orbit_determination.differential_correction.fit_least_squares.
+        rejected_ids = (
+            fitted_members.obs_id.filter(fitted_members.outlier).to_pylist()
+            if len(fitted_members) > 0
+            else None
+        )
+        fitted_orbit, _ = evaluate_orbits(
+            orbit,
+            observations,
+            self.propagator,
+            parameters=6,
+            ignore=rejected_ids if rejected_ids else None,
+        )
+        fitted_orbit = fitted_orbit.set_column("success", [True])
+        return fitted_orbit, fitted_members

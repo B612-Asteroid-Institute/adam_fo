@@ -7,7 +7,7 @@ import pytest
 from adam_fo.build import main as build_fo
 from adam_fo.config import check_build_exists
 
-from adam_core.coordinates import SphericalCoordinates
+from adam_core.coordinates import CoordinateCovariances, SphericalCoordinates
 from adam_core.coordinates.origin import Origin
 from adam_core.observers import Observers
 from adam_core.time import Timestamp
@@ -63,12 +63,20 @@ def real_data():
     bands = ["V", "V", "V", "V", "V", "V", "V", "V", "w", "w"]
     mags = [21.1, 20.5, 21.2, 21.1, 21.9, 21.2, 21.8, 21.4, 22.0, 21.9]
 
+    # Per-observation 6x6 covariance with finite RA/Dec sigmas (1 arcsec).
+    sigma_arcsec = 1.0
+    sigma_deg = sigma_arcsec / 3600.0
+    cov = np.zeros((10, 6, 6))
+    cov[:, 1, 1] = sigma_deg ** 2
+    cov[:, 2, 2] = sigma_deg ** 2
+
     coords = SphericalCoordinates.from_kwargs(
         lon=lon,
         lat=lat,
         time=obstimes,
-        origin=Origin.from_kwargs(code=["SUN"] * 10),
+        origin=Origin.from_kwargs(code=obscodes),
         frame="equatorial",
+        covariance=CoordinateCovariances.from_matrix(cov),
     )
     observers = Observers.from_codes(codes=obscodes, times=obstimes)
 
@@ -121,6 +129,30 @@ def test_success(real_data):
     # FO rejects the last two of the observations
     assert outlier_count > 0
     assert outlier_count < len(observations)
+
+
+def test_returns_fitted_orbits_with_chi2_and_success(real_data):
+    """Regression test for hw1: FindOrbOrbitFitter.initial_fit must return a
+    real FittedOrbits with reduced_chi2 and success populated, not a plain
+    Orbits. Pilot v10 was unusable because these columns silently became null
+    in the cloud worker."""
+    observations = real_data
+    out_dir = tempfile.TemporaryDirectory()
+    fitter = FindOrbOrbitFitter(fo_result_dir=out_dir.name)
+    fitted_orbit, _ = fitter.initial_fit("2009 JY22", observations)
+
+    assert len(fitted_orbit) == 1
+    # Schema columns required by callers (e.g. LOOO core.py)
+    assert "reduced_chi2" in fitted_orbit.table.column_names
+    assert "success" in fitted_orbit.table.column_names
+    # Values must be populated, not null/NaN
+    assert fitted_orbit.reduced_chi2[0].is_valid
+    assert np.isfinite(fitted_orbit.reduced_chi2[0].as_py())
+    assert fitted_orbit.success[0].is_valid
+    assert fitted_orbit.success[0].as_py() is True
+    # to_orbits() is what core.py uses downstream — must work without error
+    plain = fitted_orbit.to_orbits()
+    assert len(plain) == 1
 
 
 def test_not_enough_data(real_data):
