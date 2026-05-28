@@ -219,6 +219,45 @@ def test_findorb_failure_returns_placeholder_with_success_false(real_data, monke
     assert not fitted_members.outlier[0].is_valid
 
 
+def test_rejected_obs_match_failure_skips_gracefully(real_data):
+    """Bead 589: when FindOrb's rejected-obs list contains an entry whose
+    station+time matches no input observation (ADES round-trip can drop
+    sub-second precision, station codes can differ in case/whitespace), the
+    matching helper must log a warning and skip just THAT entry rather than
+    crashing the entire fit via ``assert len(original) == 1``. The previous
+    behavior dropped the entire (object, holdout) row from shard parquet
+    output — shard_000 in pilot v11 lost ~half its expected residual rows.
+    """
+    fitter = FindOrbOrbitFitter(fo_result_dir="/tmp/unused")
+
+    # Construct a single rejected ADES entry whose station ("ZZZ") matches no
+    # input observation. The 1-second time window is also irrelevant since
+    # station won't match.
+    rejected = ADESObservations.from_kwargs(
+        obsTime=real_data.coordinates.time[0:1],
+        ra=[real_data.coordinates.lon[0].as_py()],
+        dec=[real_data.coordinates.lat[0].as_py()],
+        rmsRACosDec=[0.5],
+        rmsDec=[0.5],
+        stn=["ZZZ"],
+        mode=["NA"],
+        astCat=["NA"],
+    )
+
+    # Must not raise; must return a member row per input observation with
+    # zero rows flagged as outlier (since the unmatched rejected entry is
+    # skipped, not matched to any input obs).
+    result = fitter._rejected_observations_to_fitted_members(
+        real_data, rejected, orbit_id="test-orbit-id"
+    )
+
+    assert len(result) == len(real_data)
+    outliers = result.outlier.to_pylist()
+    assert sum(1 for o in outliers if o) == 0, (
+        "unmatched rejected entry must be skipped, not matched to an input obs"
+    )
+
+
 def _make_seed_orbit(jd_tdb: float, x: float, y: float, z: float,
                      vx: float, vy: float, vz: float) -> Orbits:
     """Build a single-row heliocentric ecliptic J2000 Orbits in TDB."""

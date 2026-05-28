@@ -230,6 +230,32 @@ class FindOrbOrbitFitter(OrbitFitter):
                 1.0 / 86400,
             )
             original = observations.apply_mask(pc.and_(same_station, same_time))
+            if len(original) == 0:
+                # Bead 589: ADES round-trip can lose sub-second precision and
+                # station-code casing/whitespace can differ, so the strict
+                # 1-second match may return zero rows. Log diagnostic
+                # candidates and skip just this rejected entry rather than
+                # aborting the whole fit (which previously dropped the entire
+                # (object, holdout) row from the LOOO parquet).
+                wider_time = pc.less(
+                    pc.abs(
+                        pc.subtract(
+                            observations.coordinates.time.mjd(),
+                            ades.obsTime.mjd()[0],
+                        )
+                    ),
+                    5.0 / 86400,
+                )
+                candidates = observations.apply_mask(wider_time)
+                cand_stns = candidates.observers.code.to_pylist()
+                cand_mjds = candidates.coordinates.time.mjd().to_pylist()
+                logger.warning(
+                    "Could not match FindOrb rejected observation "
+                    f"(stn={ades.stn[0].as_py()!r}, mjd={ades.obsTime.mjd()[0].as_py()}) "
+                    f"to any input observation within 1s; candidates within 5s: "
+                    f"stns={cand_stns}, mjds={cand_mjds}. Skipping this rejected entry."
+                )
+                continue
             assert (
                 len(original) == 1
             ), f"Expected 1 input observation for {ades.stn[0]} at {ades.obsTime.mjd()[0]} MJD, got {original.observers.code} {original.coordinates.time.mjd()}"
@@ -242,7 +268,7 @@ class FindOrbOrbitFitter(OrbitFitter):
 
         outlier = np.isin(obs_ids_all, rejected_ids)
         assert np.sum(outlier) == len(
-            rejected
+            rejected_ids
         ), "Something failed in extracting rejected observations"
 
         od_orbit_members = FittedOrbitMembers.from_kwargs(
