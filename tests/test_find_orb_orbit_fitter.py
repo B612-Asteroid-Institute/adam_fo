@@ -161,13 +161,62 @@ def test_returns_fitted_orbits_with_chi2_and_success(real_data):
 
 def test_not_enough_data(real_data):
     # force_adam_fo_install()
+    # Bead 5h7: FindOrb failure now returns a single-row placeholder with
+    # success=False (and a member row per input obs) instead of empty tables,
+    # so the downstream LOOO writer can persist the failure as a visible row
+    # rather than silently dropping the (object, holdout) pair.
     observations = real_data[:2]
     out_dir = tempfile.TemporaryDirectory()
     fitter = FindOrbOrbitFitter(fo_result_dir=out_dir.name)
     object_id = "2009 JY22"
     fitted_orbit, fitted_members = fitter.initial_fit(object_id, observations)
-    assert len(fitted_orbit) == 0
-    assert len(fitted_members) == 0
+    assert len(fitted_orbit) == 1
+    assert fitted_orbit.success[0].as_py() is False
+    assert fitted_orbit.object_id[0].as_py() == object_id
+    assert len(fitted_members) == len(observations)
+
+
+def test_findorb_failure_returns_placeholder_with_success_false(real_data, monkeypatch):
+    """Bead 5h7: when Find_Orb exits without producing covar.json/total.json,
+    the fitter must return a non-empty single-row ``FittedOrbits`` with
+    ``success=False`` (and a member row per input observation) rather than
+    ``FittedOrbits.empty()``. The downstream LOOO writer reads
+    ``hold_in_orbit.success[0]`` to populate ``hold_in_fit_success`` — an
+    empty table is silently dropped by its ``len(hold_in_orbit) == 0`` guard,
+    making the failure invisible to catalog completeness reporting and to
+    the agg-filter (sibling bead 7bt).
+    """
+    def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None, **_):
+        return (
+            Orbits.empty(),
+            ADESObservations.empty(),
+            "Find_Orb failed, covar.json or total.json file not found",
+        )
+
+    monkeypatch.setattr("adam_fo.find_orb_orbit_fitter.fo", fake_fo)
+
+    fitter = FindOrbOrbitFitter(fo_result_dir="/tmp/unused")
+    object_id = "2009 JY22"
+    fitted_orbit, fitted_members = fitter.initial_fit(object_id, real_data)
+
+    # Single placeholder orbit row, marked as a failure
+    assert len(fitted_orbit) == 1
+    assert fitted_orbit.success[0].is_valid
+    assert fitted_orbit.success[0].as_py() is False
+    assert fitted_orbit.object_id[0].as_py() == object_id
+    # reduced_chi2 must be present in the schema; value is NaN for failures
+    assert "reduced_chi2" in fitted_orbit.table.column_names
+    assert np.isnan(fitted_orbit.reduced_chi2[0].as_py())
+
+    # One member row per input observation, so the LOOO writer sees the row
+    assert len(fitted_members) == len(real_data)
+    # All members carry the placeholder orbit's id, so the join with orbits works
+    assert (
+        fitted_members.orbit_id[0].as_py() == fitted_orbit.orbit_id[0].as_py()
+    )
+    # solution/outlier are null on a failed fit (the fit produced no solution)
+    assert not fitted_members.solution[0].is_valid
+    assert not fitted_members.outlier[0].is_valid
 
 
 def _make_seed_orbit(jd_tdb: float, x: float, y: float, z: float,
@@ -279,7 +328,10 @@ def test_warm_start_recovers_catastrophic_cold_start(real_data):
     out_cold = tempfile.TemporaryDirectory()
     cold_fitter = FindOrbOrbitFitter(fo_result_dir=out_cold.name)
     cold_fit, _ = cold_fitter.initial_fit("2009 JY22", short)
-    assert len(cold_fit) == 0, (
+    # Bead 5h7 changed the failure return shape: a failed fit now returns a
+    # single-row placeholder with success=False rather than FittedOrbits.empty().
+    # The semantic check ("cold-start fails on the short tracklet") is preserved.
+    assert len(cold_fit) == 1 and cold_fit.success[0].as_py() is False, (
         "cold-start on the 3-minute tracklet must fail (degenerate Gauss IOD); "
         "if this assertion fires the fixture has shifted and the warm-start "
         "comparison below is no longer measuring the catastrophic-recovery path"

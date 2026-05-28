@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from typing import Optional, Tuple
 
 import numpy as np
@@ -8,7 +9,7 @@ import pyarrow.compute as pc
 from mpc_obscodes import mpc_obscodes
 
 from adam_core.coordinates.cartesian import CartesianCoordinates
-from adam_core.coordinates.origin import OriginCodes
+from adam_core.coordinates.origin import Origin, OriginCodes
 from adam_core.coordinates.transform import transform_coordinates
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observations.ades import (
@@ -289,6 +290,67 @@ class FindOrbOrbitFitter(OrbitFitter):
             f"{modifier}"
         )
 
+    def _build_failure_placeholder(
+        self,
+        object_id: str | pa.LargeStringScalar,
+        observations: OrbitDeterminationObservations,
+    ) -> Tuple[FittedOrbits, FittedOrbitMembers]:
+        """Build a non-empty placeholder result for a FindOrb failure.
+
+        Bead 5h7: when Find_Orb exits without producing covar.json/total.json,
+        the downstream LOOO writer (adam_orbit_det_eval looo/core.py) reads
+        ``hold_in_orbit.success[0]`` to populate ``hold_in_fit_success``. If we
+        return ``FittedOrbits.empty()`` the writer's ``len(hold_in_orbit) == 0``
+        guard silently drops the (object, holdout) row — invisible to catalog
+        completeness reporting and to the agg-filter. Returning a single-row
+        placeholder with ``success=False`` exposes the failure as a real row.
+        """
+        if isinstance(object_id, str):
+            object_id_scalar = pa.scalar(object_id, type=pa.large_string())
+        else:
+            object_id_scalar = object_id
+
+        orbit_id = uuid.uuid4().hex
+
+        # Anchor the placeholder coordinate at the first observation's time —
+        # the orbit state is NaN since no fit converged.
+        first_time = observations.coordinates.time[0:1]
+        placeholder_coords = CartesianCoordinates.from_kwargs(
+            x=[np.nan],
+            y=[np.nan],
+            z=[np.nan],
+            vx=[np.nan],
+            vy=[np.nan],
+            vz=[np.nan],
+            time=first_time,
+            frame="ecliptic",
+            origin=Origin.from_kwargs(code=["SUN"]),
+        )
+
+        mjds = observations.coordinates.time.mjd().to_numpy(zero_copy_only=False)
+        arc_length = float(mjds.max() - mjds.min()) if len(mjds) >= 2 else 0.0
+
+        placeholder_orbit = FittedOrbits.from_kwargs(
+            orbit_id=[orbit_id],
+            object_id=[object_id_scalar],
+            coordinates=placeholder_coords,
+            arc_length=[arc_length],
+            num_obs=[len(observations)],
+            chi2=[np.nan],
+            reduced_chi2=[np.nan],
+            success=[False],
+        )
+
+        n = len(observations)
+        placeholder_members = FittedOrbitMembers.from_kwargs(
+            orbit_id=np.full(n, orbit_id, dtype="object"),
+            obs_id=observations.id,
+            solution=pa.array([None] * n, type=pa.bool_()),
+            outlier=pa.array([None] * n, type=pa.bool_()),
+        )
+
+        return placeholder_orbit, placeholder_members
+
     def initial_fit(
         self,
         object_id: str | pa.LargeStringScalar,
@@ -327,8 +389,14 @@ class FindOrbOrbitFitter(OrbitFitter):
             state_vec=state_vec,
         )
         if error is not None:
-            logger.error(f"FindOrb failed for object {object_id} with error {error}")
-            return FittedOrbits.empty(), FittedOrbitMembers.empty()
+            # Bead 5h7: return a non-empty placeholder so the downstream
+            # LOOO writer can persist a fit_success=False row instead of
+            # silently dropping the (object, holdout) pair.
+            logger.warning(
+                f"FindOrb failed for object {object_id} with error {error}; "
+                f"returning fit_success=False placeholder"
+            )
+            return self._build_failure_placeholder(object_id, observations)
 
         N = len(orbit)
         if isinstance(object_id, str):
