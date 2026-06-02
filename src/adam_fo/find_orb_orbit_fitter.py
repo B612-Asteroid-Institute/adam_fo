@@ -263,6 +263,9 @@ class FindOrbOrbitFitter(OrbitFitter):
         TT. We coerce the seed orbit to that frame/origin and append a ``,TDB``
         or ``,UTC`` modifier so Find_Orb converts the epoch internally.
         """
+        assert (
+            len(reference_orbit) == 1
+        ), f"Expected a single seed orbit, got {len(reference_orbit)}"
         coords = transform_coordinates(
             reference_orbit.coordinates[:1],
             representation_out=CartesianCoordinates,
@@ -271,12 +274,7 @@ class FindOrbOrbitFitter(OrbitFitter):
         )
         scale = coords.time.scale
         jd = float(coords.time.jd().to_numpy(zero_copy_only=False)[0])
-        x = float(coords.x[0].as_py())
-        y = float(coords.y[0].as_py())
-        z = float(coords.z[0].as_py())
-        vx = float(coords.vx[0].as_py())
-        vy = float(coords.vy[0].as_py())
-        vz = float(coords.vz[0].as_py())
+        x, y, z, vx, vy, vz = coords.values[0]
 
         if scale == "tdb":
             modifier = ",TDB"
