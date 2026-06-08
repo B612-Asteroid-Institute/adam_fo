@@ -7,6 +7,9 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from mpc_obscodes import mpc_obscodes
 
+from adam_core.coordinates.cartesian import CartesianCoordinates
+from adam_core.coordinates.origin import OriginCodes
+from adam_core.coordinates.transform import transform_coordinates
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observations.ades import (
     ADES_to_string,
@@ -23,6 +26,7 @@ from adam_core.orbit_determination.evaluate import (
     evaluate_orbits,
 )
 from adam_core.orbit_determination.orbit_fitter import OrbitFitter
+from adam_core.orbits import Orbits
 from adam_core.propagator.propagator import Propagator
 
 try:
@@ -250,10 +254,46 @@ class FindOrbOrbitFitter(OrbitFitter):
 
         return od_orbit_members
 
+    def _build_state_vec_arg(self, reference_orbit: Orbits) -> str:
+        """Format the first row of ``reference_orbit`` for Find_Orb's ``-v`` flag.
+
+        Find_Orb's ``extract_state_vect_from_text()`` (find_orb/elem_out.cpp:3024)
+        expects ``"<epoch>,<x> <y> <z> <vx> <vy> <vz>[,<modifier>...]"`` with
+        units AU and AU/day in heliocentric ecliptic J2000, default time scale
+        TT. We coerce the seed orbit to that frame/origin and append a ``,TDB``
+        or ``,UTC`` modifier so Find_Orb converts the epoch internally.
+        """
+        assert (
+            len(reference_orbit) == 1
+        ), f"Expected a single seed orbit, got {len(reference_orbit)}"
+        coords = transform_coordinates(
+            reference_orbit.coordinates[:1],
+            representation_out=CartesianCoordinates,
+            frame_out="ecliptic",
+            origin_out=OriginCodes.SUN,
+        )
+        scale = coords.time.scale
+        jd = float(coords.time.jd().to_numpy(zero_copy_only=False)[0])
+        x, y, z, vx, vy, vz = coords.values[0]
+
+        if scale == "tdb":
+            modifier = ",TDB"
+        elif scale == "utc":
+            modifier = ",UTC"
+        else:
+            modifier = ""
+
+        return (
+            f"{jd:.10f},"
+            f"{x:.12g} {y:.12g} {z:.12g} {vx:.12g} {vy:.12g} {vz:.12g}"
+            f"{modifier}"
+        )
+
     def initial_fit(
         self,
         object_id: str | pa.LargeStringScalar,
         observations: OrbitDeterminationObservations,
+        reference_orbit: Optional[Orbits] = None,
     ) -> Tuple[FittedOrbits, FittedOrbitMembers]:
         """Fit an initial orbit for a single object via Find_Orb.
 
@@ -261,6 +301,11 @@ class FindOrbOrbitFitter(OrbitFitter):
         evaluating the converged orbit against the input observations and
         ``success`` set to True. Outliers in ``FittedOrbitMembers`` reflect the
         observations that Find_Orb rejected; residuals on members are not set.
+
+        When ``reference_orbit`` is supplied, Find_Orb is warm-started from that
+        cartesian state via the ``-v`` flag, bypassing its Gauss/Vaisala cold
+        start. Pass ``None`` (the default) to preserve the legacy cold-start
+        behavior.
         """
         if observations is None or len(observations) == 0:
             logger.error(f"No observation provided for object {object_id}")
@@ -270,10 +315,16 @@ class FindOrbOrbitFitter(OrbitFitter):
         )
         ades_string, _ = self._observations_to_ades(observations)
 
+        state_vec = None
+        if reference_orbit is not None and len(reference_orbit) > 0:
+            state_vec = self._build_state_vec_arg(reference_orbit)
+            logger.info(f"Warm-starting Find_Orb for {object_id} with -v {state_vec}")
+
         orbit, rejected, error = fo(
             ades_string,
             out_dir=self.fo_result_dir,
             clean_up=self.clean_up_fo_dir,
+            state_vec=state_vec,
         )
         if error is not None:
             logger.error(f"FindOrb failed for object {object_id} with error {error}")

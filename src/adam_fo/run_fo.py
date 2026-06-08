@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -98,6 +99,7 @@ def fo(
     clean_up: bool = True,
     out_dir: Optional[str] = None,
     temp_dir: Optional[str] = None,
+    state_vec: Optional[str] = None,
 ) -> Tuple[Orbits, ADESObservations, Optional[str]]:
     """Run programmatic Find_Orb orbit determination
 
@@ -111,10 +113,18 @@ def fo(
         If provided, the temporary directory will be copied to this path after running Find_Orb.
         The bc405.dat and DE440t files will not be copied.
     temp_dir : Optional[str], optional
-        If provided, the temporary directory will be created at this location. 
-        If not provided, the default temporary directory in ~/.cache/adam_fo/ will be used. 
-        It may be useful to explicitly set the path in HPC use cases, where user directories 
+        If provided, the temporary directory will be created at this location.
+        If not provided, the default temporary directory in ~/.cache/adam_fo/ will be used.
+        It may be useful to explicitly set the path in HPC use cases, where user directories
         often have stricter disk usage quotas.
+    state_vec : Optional[str], optional
+        Pre-formatted seed for Find_Orb's ``-v`` flag. When supplied, Find_Orb
+        bypasses Gauss/Vaisala cold-start and begins least-squares from this
+        state vector. Format is the one parsed by
+        ``extract_state_vect_from_text()`` in find_orb's ``elem_out.cpp``:
+        ``"<epoch>,<x> <y> <z> <vx> <vy> <vz>[,<modifier>...]"`` — units AU
+        and AU/day, default frame heliocentric ecliptic J2000, default time
+        scale TT (append ``,TDB`` or ``,UTC`` to convert).
 
     Returns
     -------
@@ -149,6 +159,8 @@ def fo(
         f"-D {fo_tmp_dir}/environ.dat "
         f"-O {fo_tmp_dir}"
     )
+    if state_vec is not None:
+        fo_command += f" -v {shlex.quote(state_vec)}"
 
     logger.debug(f"fo command: {fo_command}")
 
