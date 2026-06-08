@@ -72,8 +72,8 @@ class FindOrbOrbitFitter(OrbitFitter):
         propagator: Propagator, optional
            Propagator used to evaluate the converged orbit so the returned
            ``FittedOrbits`` table has reduced_chi2 populated. Defaults to a
-           2-body propagator. Production callers (LOOO pipeline) should pass
-           the same propagator used downstream so chi2 is consistent.
+           2-body propagator. Callers should pass the same propagator used
+           downstream so chi2 is consistent.
         """
         super().__init__(*args, **kwargs)
         self.fo_result_dir = fo_result_dir
@@ -231,12 +231,12 @@ class FindOrbOrbitFitter(OrbitFitter):
             )
             original = observations.apply_mask(pc.and_(same_station, same_time))
             if len(original) == 0:
-                # Bead 589: ADES round-trip can lose sub-second precision and
+                # ADES round-trip can lose sub-second precision and
                 # station-code casing/whitespace can differ, so the strict
                 # 1-second match may return zero rows. Log diagnostic
                 # candidates and skip just this rejected entry rather than
-                # aborting the whole fit (which previously dropped the entire
-                # (object, holdout) row from the LOOO parquet).
+                # aborting the whole fit (which would discard an otherwise
+                # usable result over a single unmatchable rejection).
                 wider_time = pc.less(
                     pc.abs(
                         pc.subtract(
@@ -266,6 +266,10 @@ class FindOrbOrbitFitter(OrbitFitter):
         # here. We'll leave them null for now. Call evaluate_orbits later
         # to get residuals.
 
+        # Invariant: every id we matched back to an input observation flags
+        # exactly one row as an outlier. We compare against len(rejected_ids),
+        # not len(rejected): unmatchable rejected entries are skipped above, so
+        # rejected_ids may be shorter than the rejected list FindOrb returned.
         outlier = np.isin(obs_ids_all, rejected_ids)
         assert np.sum(outlier) == len(
             rejected_ids
@@ -321,15 +325,22 @@ class FindOrbOrbitFitter(OrbitFitter):
         object_id: str | pa.LargeStringScalar,
         observations: OrbitDeterminationObservations,
     ) -> Tuple[FittedOrbits, FittedOrbitMembers]:
-        """Build a non-empty placeholder result for a FindOrb failure.
+        """Build a single-row placeholder result for a FindOrb failure.
 
-        Bead 5h7: when Find_Orb exits without producing covar.json/total.json,
-        the downstream LOOO writer (adam_orbit_det_eval looo/core.py) reads
-        ``hold_in_orbit.success[0]`` to populate ``hold_in_fit_success``. If we
-        return ``FittedOrbits.empty()`` the writer's ``len(hold_in_orbit) == 0``
-        guard silently drops the (object, holdout) row — invisible to catalog
-        completeness reporting and to the agg-filter. Returning a single-row
-        placeholder with ``success=False`` exposes the failure as a real row.
+        This follows the failure contract of adam_core's reference fitter,
+        ``orbit_determination.differential_correction.fit_least_squares``,
+        which always returns a single-row ``FittedOrbits`` with ``success``
+        set (True or False) — never an empty table — even when the fit does
+        not converge. Returning ``FittedOrbits.empty()`` here would instead
+        make a FindOrb failure indistinguishable from "no object processed":
+        any consumer that guards on ``len(...) == 0`` silently drops the input
+        rather than recording the failure.
+
+        The placeholder carries ``success=False``, a NaN orbit state anchored
+        at the first observation's time, and one member row per input
+        observation (with ``solution``/``outlier`` left null, since no fit was
+        produced), so callers detect the failure via ``success`` rather than by
+        counting rows.
         """
         if isinstance(object_id, str):
             object_id_scalar = pa.scalar(object_id, type=pa.large_string())
@@ -415,9 +426,11 @@ class FindOrbOrbitFitter(OrbitFitter):
             state_vec=state_vec,
         )
         if error is not None:
-            # Bead 5h7: return a non-empty placeholder so the downstream
-            # LOOO writer can persist a fit_success=False row instead of
-            # silently dropping the (object, holdout) pair.
+            # Return a success=False placeholder rather than an empty table so
+            # callers can distinguish a failed fit from "nothing to process".
+            # Matches adam_core's fit_least_squares, which likewise returns a
+            # success-flagged row (never empty) on non-convergence. See
+            # _build_failure_placeholder for the full rationale.
             logger.warning(
                 f"FindOrb failed for object {object_id} with error {error}; "
                 f"returning fit_success=False placeholder"

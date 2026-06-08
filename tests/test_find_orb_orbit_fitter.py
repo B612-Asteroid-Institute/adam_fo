@@ -146,7 +146,7 @@ def test_returns_fitted_orbits_with_chi2_and_success(real_data):
     fitted_orbit, _ = fitter.initial_fit("2009 JY22", observations)
 
     assert len(fitted_orbit) == 1
-    # Schema columns required by callers (e.g. LOOO core.py)
+    # Schema columns required by downstream callers
     assert "reduced_chi2" in fitted_orbit.table.column_names
     assert "success" in fitted_orbit.table.column_names
     # Values must be populated, not null/NaN
@@ -161,10 +161,10 @@ def test_returns_fitted_orbits_with_chi2_and_success(real_data):
 
 def test_not_enough_data(real_data):
     # force_adam_fo_install()
-    # Bead 5h7: FindOrb failure now returns a single-row placeholder with
+    # A FindOrb failure now returns a single-row placeholder with
     # success=False (and a member row per input obs) instead of empty tables,
-    # so the downstream LOOO writer can persist the failure as a visible row
-    # rather than silently dropping the (object, holdout) pair.
+    # so callers can detect the failure via success rather than by an empty
+    # table that is easily mistaken for "nothing to process".
     observations = real_data[:2]
     out_dir = tempfile.TemporaryDirectory()
     fitter = FindOrbOrbitFitter(fo_result_dir=out_dir.name)
@@ -177,14 +177,15 @@ def test_not_enough_data(real_data):
 
 
 def test_findorb_failure_returns_placeholder_with_success_false(real_data, monkeypatch):
-    """Bead 5h7: when Find_Orb exits without producing covar.json/total.json,
-    the fitter must return a non-empty single-row ``FittedOrbits`` with
-    ``success=False`` (and a member row per input observation) rather than
-    ``FittedOrbits.empty()``. The downstream LOOO writer reads
-    ``hold_in_orbit.success[0]`` to populate ``hold_in_fit_success`` — an
-    empty table is silently dropped by its ``len(hold_in_orbit) == 0`` guard,
-    making the failure invisible to catalog completeness reporting and to
-    the agg-filter (sibling bead 7bt).
+    """When Find_Orb exits without producing covar.json/total.json, the fitter
+    must return a non-empty single-row ``FittedOrbits`` with ``success=False``
+    (and a member row per input observation) rather than ``FittedOrbits.empty()``.
+
+    This matches the failure contract of adam_core's reference fitter
+    ``fit_least_squares``, which always returns a success-flagged row and never
+    an empty table. An empty table is easily dropped by downstream
+    ``len(...) == 0`` guards, making the failure invisible; the placeholder
+    keeps it detectable via ``success``.
     """
     def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None, **_):
         return (
@@ -208,7 +209,7 @@ def test_findorb_failure_returns_placeholder_with_success_false(real_data, monke
     assert "reduced_chi2" in fitted_orbit.table.column_names
     assert np.isnan(fitted_orbit.reduced_chi2[0].as_py())
 
-    # One member row per input observation, so the LOOO writer sees the row
+    # One member row per input observation, so downstream consumers see the row
     assert len(fitted_members) == len(real_data)
     # All members carry the placeholder orbit's id, so the join with orbits works
     assert (
@@ -220,13 +221,12 @@ def test_findorb_failure_returns_placeholder_with_success_false(real_data, monke
 
 
 def test_rejected_obs_match_failure_skips_gracefully(real_data):
-    """Bead 589: when FindOrb's rejected-obs list contains an entry whose
-    station+time matches no input observation (ADES round-trip can drop
-    sub-second precision, station codes can differ in case/whitespace), the
-    matching helper must log a warning and skip just THAT entry rather than
-    crashing the entire fit via ``assert len(original) == 1``. The previous
-    behavior dropped the entire (object, holdout) row from shard parquet
-    output — shard_000 in pilot v11 lost ~half its expected residual rows.
+    """When FindOrb's rejected-obs list contains an entry whose station+time
+    matches no input observation (ADES round-trip can drop sub-second
+    precision, station codes can differ in case/whitespace), the matching
+    helper must log a warning and skip just THAT entry rather than crashing
+    the entire fit via ``assert len(original) == 1``. The previous behavior
+    discarded the whole fit over a single unmatchable rejection.
     """
     fitter = FindOrbOrbitFitter(fo_result_dir="/tmp/unused")
 
@@ -348,11 +348,9 @@ def test_warm_start_recovers_catastrophic_cold_start(real_data):
     branch in ``fetch_previous_solution()`` (find_orb/elem_out.cpp:3244) and
     skip the IOD altogether, converging via least-squares from the seed.
 
-    This mirrors the catastrophic-cold-start tail observed in pilot v11
-    (8.82% of LOOO rows above 60 arcsec, max 261k arcsec residual): without
-    a seed, short held-in arcs produce either no orbit or an orbit so far
-    from truth that downstream evaluation chi² explodes. With a seed, the
-    fitter converges. See adam_orbit_det_eval/docs/findorb-warm-start.md.
+    This exercises the catastrophic-cold-start path: without a seed, short
+    held-in arcs produce either no orbit or an orbit so far from truth that
+    downstream evaluation chi² explodes; with a seed, the fitter converges.
     """
     obs_full = real_data
     short = obs_full[:4]  # 3-minute G96 tracklet — Gauss IOD is degenerate
@@ -367,9 +365,9 @@ def test_warm_start_recovers_catastrophic_cold_start(real_data):
     out_cold = tempfile.TemporaryDirectory()
     cold_fitter = FindOrbOrbitFitter(fo_result_dir=out_cold.name)
     cold_fit, _ = cold_fitter.initial_fit("2009 JY22", short)
-    # Bead 5h7 changed the failure return shape: a failed fit now returns a
-    # single-row placeholder with success=False rather than FittedOrbits.empty().
-    # The semantic check ("cold-start fails on the short tracklet") is preserved.
+    # A failed fit returns a single-row placeholder with success=False rather
+    # than FittedOrbits.empty(). The semantic check ("cold-start fails on the
+    # short tracklet") is preserved.
     assert len(cold_fit) == 1 and cold_fit.success[0].as_py() is False, (
         "cold-start on the 3-minute tracklet must fail (degenerate Gauss IOD); "
         "if this assertion fires the fixture has shifted and the warm-start "
