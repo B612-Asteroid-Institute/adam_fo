@@ -257,7 +257,7 @@ class FindOrbOrbitFitter(OrbitFitter):
                 continue
             assert (
                 len(original) == 1
-            ), f"Expected 1 input observation for {ades.stn[0]} at {ades.obsTime.mjd()[0]} MJD, got {original.observers.code} {original.coordinates.time.mjd()}"
+            ), f"Expected 1 input observation for {ades.stn[0]} at {rejected_mjd_utc} MJD (UTC), got {original.observers.code} {pc.filter(obs_mjd_utc, pc.and_(same_station, same_time))}"
             rejected_ids.append(original.id[0].as_py())
 
         # To calculate residuals we need covariance matrix without NaNs, but
@@ -341,11 +341,8 @@ class FindOrbOrbitFitter(OrbitFitter):
         produced), so callers detect the failure via ``success`` rather than by
         counting rows.
         """
-        if isinstance(object_id, str):
-            object_id_scalar = pa.scalar(object_id, type=pa.large_string())
-        else:
-            object_id_scalar = object_id
-
+        # Mint a fresh orbit_id: Find_Orb produced no orbit to take an id
+        # from, and uuid4().hex is FittedOrbits.orbit_id's own column default.
         orbit_id = uuid.uuid4().hex
 
         # Anchor the placeholder coordinate at the first observation's time —
@@ -368,7 +365,7 @@ class FindOrbOrbitFitter(OrbitFitter):
 
         placeholder_orbit = FittedOrbits.from_kwargs(
             orbit_id=[orbit_id],
-            object_id=[object_id_scalar],
+            object_id=[object_id],
             coordinates=placeholder_coords,
             arc_length=[arc_length],
             num_obs=[len(observations)],
