@@ -258,6 +258,44 @@ def test_rejected_obs_match_failure_skips_gracefully(real_data):
     )
 
 
+def test_rejected_obs_matching_is_time_scale_invariant(real_data):
+    """The rejected-obs join compares epochs in a common scale (UTC). A
+    rejected entry whose ``obsTime`` carries a different scale (here TT,
+    ~69 s offset from UTC if compared naively) must still match its input
+    observation: both sides are rescaled to UTC before the 1-second window
+    is applied. Without the rescale, every such entry would silently fail
+    to match and be skipped, leaving outliers unflagged and inflating
+    reduced_chi2 downstream.
+    """
+    fitter = FindOrbOrbitFitter(fo_result_dir="/tmp/unused")
+
+    # Same instant as the first input observation, expressed in TT.
+    rejected = ADESObservations.from_kwargs(
+        obsTime=real_data.coordinates.time[0:1].rescale("tt"),
+        ra=[real_data.coordinates.lon[0].as_py()],
+        dec=[real_data.coordinates.lat[0].as_py()],
+        rmsRACosDec=[0.5],
+        rmsDec=[0.5],
+        stn=[real_data.observers.code[0].as_py()],
+        mode=["NA"],
+        astCat=["NA"],
+    )
+
+    result = fitter._rejected_observations_to_fitted_members(
+        real_data, rejected, orbit_id="test-orbit-id"
+    )
+
+    assert len(result) == len(real_data)
+    outliers = result.outlier.to_pylist()
+    assert sum(1 for o in outliers if o) == 1, (
+        "a rejected entry at the same instant in a different time scale "
+        "must match its input observation after rescaling to UTC"
+    )
+    # The flagged row must be the first observation specifically.
+    flagged_idx = outliers.index(True)
+    assert result.obs_id[flagged_idx].as_py() == real_data.id[0].as_py()
+
+
 def _make_seed_orbit(jd_tdb: float, x: float, y: float, z: float,
                      vx: float, vy: float, vz: float) -> Orbits:
     """Build a single-row heliocentric ecliptic J2000 Orbits in TDB."""

@@ -216,17 +216,21 @@ class FindOrbOrbitFitter(OrbitFitter):
 
         assert len(observations) >= len(rejected)
         obs_ids_all = observations.id
+        # Compare epochs in a common time scale. The rejected list is
+        # reconstructed from Find_Orb's output in UTC, while the input table
+        # may carry any scale (ADES serialization rescales to UTC on write, so
+        # the fit itself is scale-agnostic). Rescaling both sides here keeps
+        # the 1-second join below correct by construction; rescale() is a
+        # no-op when the scale already matches.
+        obs_mjd_utc = observations.coordinates.time.rescale("utc").mjd()
         rejected_ids = []
         for ades in rejected:
             # Observation id is not passed fully in the ADES format, so we need to match on fields.
             # Look for an observation from the same station within 1 second. There should be exactly 1
+            rejected_mjd_utc = ades.obsTime.rescale("utc").mjd()[0]
             same_station = pc.equal(observations.observers.code, ades.stn[0])
             same_time = pc.less(
-                pc.abs(
-                    pc.subtract(
-                        observations.coordinates.time.mjd(), ades.obsTime.mjd()[0]
-                    )
-                ),
+                pc.abs(pc.subtract(obs_mjd_utc, rejected_mjd_utc)),
                 1.0 / 86400,
             )
             original = observations.apply_mask(pc.and_(same_station, same_time))
@@ -238,22 +242,17 @@ class FindOrbOrbitFitter(OrbitFitter):
                 # aborting the whole fit (which would discard an otherwise
                 # usable result over a single unmatchable rejection).
                 wider_time = pc.less(
-                    pc.abs(
-                        pc.subtract(
-                            observations.coordinates.time.mjd(),
-                            ades.obsTime.mjd()[0],
-                        )
-                    ),
+                    pc.abs(pc.subtract(obs_mjd_utc, rejected_mjd_utc)),
                     5.0 / 86400,
                 )
                 candidates = observations.apply_mask(wider_time)
                 cand_stns = candidates.observers.code.to_pylist()
-                cand_mjds = candidates.coordinates.time.mjd().to_pylist()
+                cand_mjds = pc.filter(obs_mjd_utc, wider_time).to_pylist()
                 logger.warning(
                     "Could not match FindOrb rejected observation "
-                    f"(stn={ades.stn[0].as_py()!r}, mjd={ades.obsTime.mjd()[0].as_py()}) "
+                    f"(stn={ades.stn[0].as_py()!r}, mjd_utc={rejected_mjd_utc.as_py()}) "
                     f"to any input observation within 1s; candidates within 5s: "
-                    f"stns={cand_stns}, mjds={cand_mjds}. Skipping this rejected entry."
+                    f"stns={cand_stns}, mjds_utc={cand_mjds}. Skipping this rejected entry."
                 )
                 continue
             assert (
