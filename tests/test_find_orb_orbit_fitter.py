@@ -208,6 +208,10 @@ def test_findorb_failure_returns_placeholder_with_success_false(real_data, monke
     # reduced_chi2 must be present in the schema; value is NaN for failures
     assert "reduced_chi2" in fitted_orbit.table.column_names
     assert np.isnan(fitted_orbit.reduced_chi2[0].as_py())
+    # num_obs/arc_length follow evaluate_orbits' "included in the fit"
+    # semantics: a failed fit included no observations.
+    assert fitted_orbit.num_obs[0].as_py() == 0
+    assert fitted_orbit.arc_length[0].as_py() == 0.0
 
     # One member row per input observation, so downstream consumers see the row
     assert len(fitted_members) == len(real_data)

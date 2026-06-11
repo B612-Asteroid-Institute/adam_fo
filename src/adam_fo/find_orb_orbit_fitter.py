@@ -360,15 +360,16 @@ class FindOrbOrbitFitter(OrbitFitter):
             origin=Origin.from_kwargs(code=["SUN"]),
         )
 
-        mjds = observations.coordinates.time.mjd().to_numpy(zero_copy_only=False)
-        arc_length = float(mjds.max() - mjds.min()) if len(mjds) >= 2 else 0.0
-
+        # num_obs and arc_length follow evaluate_orbits' semantics: both are
+        # computed over the observations *included in the fit*, and a failed
+        # fit included none. The attempted set remains recoverable through the
+        # member rows' obs_ids.
         placeholder_orbit = FittedOrbits.from_kwargs(
             orbit_id=[orbit_id],
             object_id=[object_id],
             coordinates=placeholder_coords,
-            arc_length=[arc_length],
-            num_obs=[len(observations)],
+            arc_length=[0.0],
+            num_obs=[0],
             chi2=[np.nan],
             reduced_chi2=[np.nan],
             success=[False],
