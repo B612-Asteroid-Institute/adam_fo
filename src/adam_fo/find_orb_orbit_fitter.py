@@ -6,8 +6,6 @@ from typing import Optional, Tuple
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
-from mpc_obscodes import mpc_obscodes
-
 from adam_core.coordinates.cartesian import CartesianCoordinates
 from adam_core.coordinates.origin import Origin, OriginCodes
 from adam_core.coordinates.transform import transform_coordinates
@@ -29,6 +27,7 @@ from adam_core.orbit_determination.evaluate import (
 from adam_core.orbit_determination.orbit_fitter import OrbitFitter
 from adam_core.orbits import Orbits
 from adam_core.propagator.propagator import Propagator
+from mpc_obscodes import mpc_obscodes
 
 try:
     from adam_fo import fo

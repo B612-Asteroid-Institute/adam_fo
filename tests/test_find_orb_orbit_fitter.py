@@ -2,20 +2,22 @@ import pickle
 import tempfile
 
 import numpy as np
-import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from adam_fo.build import main as build_fo
-from adam_fo.config import check_build_exists
-
 from adam_core.coordinates import CoordinateCovariances, SphericalCoordinates
 from adam_core.coordinates.cartesian import CartesianCoordinates
 from adam_core.coordinates.origin import Origin
 from adam_core.observations.ades import ADESObservations
 from adam_core.observers import Observers
+from adam_core.orbit_determination.evaluate import (
+    OrbitDeterminationObservations,
+    OrbitDeterminationPhotometry,
+)
 from adam_core.orbits import Orbits
 from adam_core.time import Timestamp
-from adam_core.orbit_determination.evaluate import OrbitDeterminationObservations, OrbitDeterminationPhotometry
+
+from adam_fo.build import main as build_fo
+from adam_fo.config import check_build_exists
 from adam_fo.find_orb_orbit_fitter import FindOrbOrbitFitter
 
 
@@ -71,8 +73,8 @@ def real_data():
     sigma_arcsec = 1.0
     sigma_deg = sigma_arcsec / 3600.0
     cov = np.zeros((10, 6, 6))
-    cov[:, 1, 1] = sigma_deg ** 2
-    cov[:, 2, 2] = sigma_deg ** 2
+    cov[:, 1, 1] = sigma_deg**2
+    cov[:, 2, 2] = sigma_deg**2
 
     coords = SphericalCoordinates.from_kwargs(
         lon=lon,
@@ -187,6 +189,7 @@ def test_findorb_failure_returns_placeholder_with_success_false(real_data, monke
     ``len(...) == 0`` guards, making the failure invisible; the placeholder
     keeps it detectable via ``success``.
     """
+
     def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None, **_):
         return (
             Orbits.empty(),
@@ -216,9 +219,7 @@ def test_findorb_failure_returns_placeholder_with_success_false(real_data, monke
     # One member row per input observation, so downstream consumers see the row
     assert len(fitted_members) == len(real_data)
     # All members carry the placeholder orbit's id, so the join with orbits works
-    assert (
-        fitted_members.orbit_id[0].as_py() == fitted_orbit.orbit_id[0].as_py()
-    )
+    assert fitted_members.orbit_id[0].as_py() == fitted_orbit.orbit_id[0].as_py()
     # solution/outlier are null on a failed fit (the fit produced no solution)
     assert not fitted_members.solution[0].is_valid
     assert not fitted_members.outlier[0].is_valid
@@ -257,9 +258,9 @@ def test_rejected_obs_match_failure_skips_gracefully(real_data):
 
     assert len(result) == len(real_data)
     outliers = result.outlier.to_pylist()
-    assert sum(1 for o in outliers if o) == 0, (
-        "unmatched rejected entry must be skipped, not matched to an input obs"
-    )
+    assert (
+        sum(1 for o in outliers if o) == 0
+    ), "unmatched rejected entry must be skipped, not matched to an input obs"
 
 
 def test_rejected_obs_matching_is_time_scale_invariant(real_data):
@@ -300,8 +301,9 @@ def test_rejected_obs_matching_is_time_scale_invariant(real_data):
     assert result.obs_id[flagged_idx].as_py() == real_data.id[0].as_py()
 
 
-def _make_seed_orbit(jd_tdb: float, x: float, y: float, z: float,
-                     vx: float, vy: float, vz: float) -> Orbits:
+def _make_seed_orbit(
+    jd_tdb: float, x: float, y: float, z: float, vx: float, vy: float, vz: float
+) -> Orbits:
     """Build a single-row heliocentric ecliptic J2000 Orbits in TDB."""
     mjd = jd_tdb - 2400000.5
     days = int(np.floor(mjd))
@@ -311,7 +313,12 @@ def _make_seed_orbit(jd_tdb: float, x: float, y: float, z: float,
         orbit_id=["seed-1"],
         object_id=["TEST"],
         coordinates=CartesianCoordinates.from_kwargs(
-            x=[x], y=[y], z=[z], vx=[vx], vy=[vy], vz=[vz],
+            x=[x],
+            y=[y],
+            z=[z],
+            vx=[vx],
+            vy=[vy],
+            vz=[vz],
             time=epoch,
             frame="ecliptic",
             origin=Origin.from_kwargs(code=["SUN"]),
@@ -326,8 +333,7 @@ def test_initial_fit_omits_state_vec_without_seed(real_data, monkeypatch):
     """
     captured = {}
 
-    def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None,
-                **_):
+    def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None, **_):
         captured["state_vec"] = state_vec
         return Orbits.empty(), ADESObservations.empty(), "stop"
 
@@ -348,8 +354,7 @@ def test_initial_fit_forwards_reference_orbit_as_state_vec(real_data, monkeypatc
     """
     captured = {}
 
-    def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None,
-                **_):
+    def fake_fo(ades_string, out_dir=None, clean_up=True, state_vec=None, **_):
         captured["state_vec"] = state_vec
         return Orbits.empty(), ADESObservations.empty(), "stop"
 
@@ -357,8 +362,12 @@ def test_initial_fit_forwards_reference_orbit_as_state_vec(real_data, monkeypatc
 
     seed = _make_seed_orbit(
         jd_tdb=2459580.5,
-        x=1.5, y=1.6, z=0.05,
-        vx=-0.011, vy=0.0095, vz=-0.0005,
+        x=1.5,
+        y=1.6,
+        z=0.05,
+        vx=-0.011,
+        vy=0.0095,
+        vz=-0.0005,
     )
 
     fitter = FindOrbOrbitFitter(fo_result_dir="/tmp/unused")
@@ -425,11 +434,13 @@ def test_warm_start_recovers_catastrophic_cold_start(real_data):
 
     # The warm-start orbit must be physically sensible: main-belt heliocentric
     # distance, not a degenerate IOD result like r2 -> 0 or r2 -> infinity.
-    warm_xyz = np.array([
-        warm_fit.coordinates.x[0].as_py(),
-        warm_fit.coordinates.y[0].as_py(),
-        warm_fit.coordinates.z[0].as_py(),
-    ])
+    warm_xyz = np.array(
+        [
+            warm_fit.coordinates.x[0].as_py(),
+            warm_fit.coordinates.y[0].as_py(),
+            warm_fit.coordinates.z[0].as_py(),
+        ]
+    )
     helio_dist = float(np.linalg.norm(warm_xyz))
     assert 1.0 < helio_dist < 5.0, (
         f"warm-start heliocentric distance {helio_dist:.3f} AU outside main-belt "
