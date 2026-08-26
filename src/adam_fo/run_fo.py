@@ -1,18 +1,20 @@
 import logging
 import os
 import pathlib
-import shlex
 import shutil
 import subprocess
 import tempfile
 from typing import Optional, Tuple
 
-import pyarrow.compute as pc
 from adam_core.observations.ades import ADESObservations
 from adam_core.orbits import Orbits
 
 from . import config
-from .conversions import fo_to_adam_orbit_cov, rejected_observations_from_fo
+from .conversions import (
+    FindOrbFormatError,
+    fo_to_adam_orbit_cov,
+    rejected_observations_from_fo,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.environ.get("ADAM_LOG_LEVEL", "INFO"))
@@ -40,12 +42,12 @@ def _populate_fo_directory(working_dir: str) -> str:
 
     # Copy required files from the build directory
     fo_files_dir = config.BUILD_DIR / "find_orb/find_orb"
-    for file in required_files:
-        src = fo_files_dir / file
-        dst = os.path.join(working_dir, file)
+    for filename in required_files:
+        src = fo_files_dir / filename
+        dst = os.path.join(working_dir, filename)
         if not src.exists():
             raise RuntimeError(
-                f"Required file {file} not found in {fo_files_dir}. "
+                f"Required file {filename} not found in {fo_files_dir}. "
                 "Please run 'build-fo' command to install find_orb properly."
             )
         shutil.copy2(src, dst)
@@ -60,13 +62,13 @@ def _populate_fo_directory(working_dir: str) -> str:
 
     # Template in the JPL path to environ.dat
     environ_dat_template = pathlib.Path(__file__).parent / "environ.dat.tpl"
-    with open(environ_dat_template, "r") as file:
-        environ_dat_content = file.read()
+    with open(environ_dat_template, "r") as template_file:
+        environ_dat_content = template_file.read()
     environ_dat_content = environ_dat_content.format(
         LINUX_JPL_FILENAME=config.LINUX_JPL_PATH.absolute(),
     )
-    with open(os.path.join(working_dir, "environ.dat"), "w") as file:
-        file.write(environ_dat_content)
+    with open(os.path.join(working_dir, "environ.dat"), "w") as environ_file:
+        environ_file.write(environ_dat_content)
 
     return working_dir
 
@@ -79,15 +81,31 @@ def _create_fo_tmp_directory(base_tmp_dir: Optional[str] = None) -> str:
     Returns:
         str: The absolute path to the temporary directory populated with necessary FO files
     """
-    base_tmp_dir = config.get_cache_dir() if base_tmp_dir is None else base_tmp_dir
-    os.makedirs(base_tmp_dir, mode=0o770, exist_ok=True)
-    tmp_dir = tempfile.mkdtemp(dir=base_tmp_dir, prefix="fo_")
-    os.chmod(tmp_dir, 0o770)
-    tmp_dir = _populate_fo_directory(tmp_dir)
-    return tmp_dir
+    resolved_base_dir = (
+        str(config.get_cache_dir()) if base_tmp_dir is None else base_tmp_dir
+    )
+    os.makedirs(resolved_base_dir, mode=0o770, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(dir=resolved_base_dir, prefix="fo_")
+    try:
+        os.chmod(tmp_dir, 0o770)
+        return _populate_fo_directory(tmp_dir)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
 
-def _de440t_exists():
+def _copy_fo_evidence(fo_tmp_dir: str, out_dir: Optional[str]) -> None:
+    if out_dir is None:
+        return
+    shutil.copytree(
+        fo_tmp_dir,
+        out_dir,
+        ignore=shutil.ignore_patterns("bc405.dat", "linux_p1550p2650.440t"),
+        dirs_exist_ok=True,
+    )
+
+
+def _de440t_exists() -> None:
     if not config.LINUX_JPL_PATH.exists():
         raise Exception(
             f"DE440t file not found at {config.LINUX_JPL_PATH}, find_orb will not work correctly"
@@ -138,70 +156,70 @@ def fo(
     _de440t_exists()
     fo_tmp_dir = _create_fo_tmp_directory(temp_dir)
 
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    try:
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
 
-    # Create input file
-    input_file = os.path.join(fo_tmp_dir, "observations.ades")
-    with open(input_file, "w") as file:
-        file.write(ades_string)
+        input_file = os.path.join(fo_tmp_dir, "observations.ades")
+        with open(input_file, "w") as file:
+            file.write(ades_string)
 
-    # Get the current logger log level
-    current_log_level = logger.getEffectiveLevel()
-    # fo uses 2 for INFO, 10 for most debugging
-    fo_debug_level = 2
-    if current_log_level < 10:
-        fo_debug_level = 10
-    # Run Find_Orb
-    fo_command = (
-        f"{config.FO_BINARY_DIR}/fo {input_file} -c "
-        f"-d {fo_debug_level} "
-        f"-D {fo_tmp_dir}/environ.dat "
-        f"-O {fo_tmp_dir}"
-    )
-    if state_vec is not None:
-        fo_command += f" -v {shlex.quote(state_vec)}"
-
-    logger.debug(f"fo command: {fo_command}")
-
-    result = subprocess.run(
-        fo_command,
-        shell=True,
-        cwd=fo_tmp_dir,
-        text=True,
-        capture_output=True,
-    )
-    logger.debug(f"{result.stdout}\n{result.stderr}")
-
-    if result.returncode != 0:
-        logger.warning(
-            f"Find_Orb failed with return code {result.returncode} for observations in {fo_tmp_dir}"
-        )
-        logger.warning(f"{result.stdout}\n{result.stderr}")
-        return Orbits.empty(), ADESObservations.empty(), "Find_Orb failed"
-
-    if not os.path.exists(f"{fo_tmp_dir}/covar.json") or not os.path.exists(
-        f"{fo_tmp_dir}/total.json"
-    ):
-        logger.warning("Find_Orb failed, covar.json or total.json file not found")
-        return (
-            Orbits.empty(),
-            ADESObservations.empty(),
-            "Find_Orb failed, covar.json or total.json file not found",
-        )
-
-    orbit = fo_to_adam_orbit_cov(fo_tmp_dir)
-    rejected = rejected_observations_from_fo(fo_tmp_dir)
-
-    if out_dir:
-        shutil.copytree(
+        current_log_level = logger.getEffectiveLevel()
+        fo_debug_level = 10 if current_log_level < 10 else 2
+        fo_command = [
+            str(config.FO_BINARY_DIR / "fo"),
+            input_file,
+            "-c",
+            "-d",
+            str(fo_debug_level),
+            "-D",
+            f"{fo_tmp_dir}/environ.dat",
+            "-O",
             fo_tmp_dir,
-            out_dir,
-            ignore=shutil.ignore_patterns("bc405.dat", "linux_p1550p2650.440t"),
-            dirs_exist_ok=True,
+        ]
+        if state_vec is not None:
+            fo_command.extend(["-v", state_vec])
+
+        logger.debug("fo command: %s", fo_command)
+        result = subprocess.run(
+            fo_command,
+            cwd=fo_tmp_dir,
+            text=True,
+            capture_output=True,
         )
+        logger.debug("%s\n%s", result.stdout, result.stderr)
 
-    if clean_up:
-        shutil.rmtree(fo_tmp_dir)
+        if result.returncode != 0:
+            logger.warning(
+                "Find_Orb failed with return code %s for observations in %s",
+                result.returncode,
+                fo_tmp_dir,
+            )
+            logger.warning("%s\n%s", result.stdout, result.stderr)
+            _copy_fo_evidence(fo_tmp_dir, out_dir)
+            return Orbits.empty(), ADESObservations.empty(), "Find_Orb failed"
 
-    return orbit, rejected, None
+        if not os.path.exists(f"{fo_tmp_dir}/covar.json") or not os.path.exists(
+            f"{fo_tmp_dir}/total.json"
+        ):
+            logger.warning("Find_Orb failed, covar.json or total.json file not found")
+            _copy_fo_evidence(fo_tmp_dir, out_dir)
+            return (
+                Orbits.empty(),
+                ADESObservations.empty(),
+                "Find_Orb failed, covar.json or total.json file not found",
+            )
+
+        _copy_fo_evidence(fo_tmp_dir, out_dir)
+
+        try:
+            orbit = fo_to_adam_orbit_cov(fo_tmp_dir)
+            rejected = rejected_observations_from_fo(fo_tmp_dir)
+        except FindOrbFormatError as error:
+            logger.warning("Find_Orb output validation failed: %s", error)
+            return Orbits.empty(), ADESObservations.empty(), str(error)
+
+        return orbit, rejected, None
+    finally:
+        if clean_up:
+            shutil.rmtree(fo_tmp_dir)
