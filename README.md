@@ -71,6 +71,21 @@ else:
 
 4. **Automatic Setup**: Handles Find_Orb installation and configuration automatically.
 
+## Importing Find_Orb `covar.json`
+
+Modern Find_Orb writes `covar.json` after a successful covariance-based least-squares fit. Import that numerical product directly without companion element files:
+
+```python
+from adam_fo import convert_find_orb_covariance
+
+conversion = convert_find_orb_covariance("/path/to/covar.json")
+orbits = conversion.orbits
+```
+
+The importer accepts a JSON object containing exactly `state_vect`, `covar`, and `epoch`, with no duplicate or additional keys, up to 1 MiB. It validates the finite six-value Cartesian state, finite nonzero symmetric positive-semidefinite 6×6 covariance, and finite shared epoch. Epoch plausibility is intentionally not inferred beyond finiteness.
+
+The conventions are those of the Find_Orb source pinned by `build_fo.sh` (`Bill-Gray/find_orb@7e02c585cb4e13130c9b2e9c82b9e95469b738b5`, `orb_func.cpp` `full_improvement()` covariance output): TT, heliocentric J2000 ecliptic, AU, AU/day, and `x, y, z, vx, vy, vz`. The returned Orbit is intentionally unbound: uploaded identifiers are not identity proof. Importing `covar.json` validates the supplied numerical product but does not independently verify the observations or original fit. Future Find_Orb versions that change this exact schema or convention contract must be reviewed before acceptance.
+
 ## Configuration
 
 Find_Orb configuration is handled through environment variables and configuration files:

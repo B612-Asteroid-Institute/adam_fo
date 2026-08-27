@@ -1,6 +1,8 @@
+import hashlib
 import json
 import logging
 import math
+import struct
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -17,38 +19,35 @@ from adam_core.time import Timestamp
 
 logger = logging.getLogger(__name__)
 
-_COMPANION_FILENAMES = (
-    "elements.json",
-    "elem_short.json",
-    "total.json",
-    "combined.json",
-)
 _COVARIANCE_SYMMETRY_RTOL = 1e-7
-_MAX_JSON_BYTES = 32 * 1024 * 1024
-_MAX_ELEMENT_EPOCH_GAP_DAYS = 45.0
-_DEGENERATE_ECCENTRICITY = 1e-4
-_DEGENERATE_INCLINATION_DEGREES = 0.1
+# This deliberately matches the API and Jobs execution trust boundaries. The
+# accepted antisymmetric serialization noise is removed before this PSD check.
+_COVARIANCE_PSD_RTOL = 1e-10
+_MAX_JSON_BYTES = 1024 * 1024
+_FIND_ORB_COVARIANCE_FIELDS = frozenset({"state_vect", "covar", "epoch"})
+_COVARIANCE_ORDER = ("x", "y", "z", "vx", "vy", "vz")
+_FIND_ORB_CONVENTION_SOURCE = (
+    "Bill-Gray/find_orb@7e02c585cb4e13130c9b2e9c82b9e95469b738b5 "
+    "orb_func.cpp full_improvement covar.json output"
+)
 
 
 class FindOrbFormatError(ValueError):
-    """Raised when a Find_Orb output bundle is unsafe to canonicalize."""
+    """Raised when a Find_Orb covariance file is unsafe to canonicalize."""
 
 
 @dataclass(frozen=True)
 class FindOrbMetadata:
-    object_id: str
-    packed_id: str | None
-    companion_file: str
-    companion_files: tuple[str, ...]
+    source_filename: str
     covariance_epoch_jd_tt: float
-    element_epoch_jd_tt: float
-    central_body: str
+    origin: str
     frame: str
-    reference: str
-    absolute_magnitude: float | None
-    slope_parameter: float | None
-    find_orb_version_jd: float | None
-    consistency_check: str
+    time_scale: str
+    position_unit: str
+    velocity_unit: str
+    covariance_order: tuple[str, ...]
+    convention_source: str
+    fit_verified: bool
 
 
 @dataclass(frozen=True)
@@ -66,17 +65,34 @@ class _CompanionSolution:
     find_orb_version_jd: float | None
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            key_hint = repr(key[:100])
+            raise FindOrbFormatError(f"Find_Orb JSON contains duplicate key {key_hint}")
+        value[key] = item
+    return value
+
+
 def _read_json_object(path: Path) -> dict[str, object]:
     try:
-        if path.stat().st_size > _MAX_JSON_BYTES:
+        with path.open("rb") as file:
+            encoded = file.read(_MAX_JSON_BYTES + 1)
+        if len(encoded) > _MAX_JSON_BYTES:
             raise FindOrbFormatError(
-                f"Find_Orb JSON file {path.name!r} exceeds the 32 MiB limit"
+                f"Find_Orb JSON file {path.name!r} exceeds the 1 MiB limit"
             )
-        with path.open("r", encoding="utf-8") as file:
-            value = cast(object, json.load(file))
+        value = cast(
+            object,
+            json.loads(
+                encoded.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+            ),
+        )
     except FindOrbFormatError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
         raise FindOrbFormatError(
             f"Could not read Find_Orb JSON file {path.name!r}"
         ) from error
@@ -103,7 +119,10 @@ def _sequence(value: object, *, field: str) -> Sequence[object]:
 def _finite_float(value: object, *, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise FindOrbFormatError(f"Find_Orb field {field!r} must be numeric")
-    parsed = float(value)
+    try:
+        parsed = float(value)
+    except OverflowError as error:
+        raise FindOrbFormatError(f"Find_Orb field {field!r} must be finite") from error
     if not math.isfinite(parsed):
         raise FindOrbFormatError(f"Find_Orb field {field!r} must be finite")
     return parsed
@@ -233,65 +252,19 @@ def _parse_companion(path: Path) -> _CompanionSolution:
     )
 
 
-def _load_companions(
-    bundle_path: Path,
-) -> tuple[_CompanionSolution, tuple[_CompanionSolution, ...]]:
-    companions = tuple(
-        _parse_companion(bundle_path / filename)
-        for filename in _COMPANION_FILENAMES
-        if (bundle_path / filename).is_file()
-    )
-    if not companions:
-        allowed = ", ".join(_COMPANION_FILENAMES)
-        raise FindOrbFormatError(
-            f"Find_Orb bundle requires one companion file: {allowed}"
-        )
-
-    primary = companions[0]
-    for companion in companions[1:]:
-        _validate_companions_match(primary, companion)
-    return primary, companions
-
-
-def _validate_companions_match(
-    expected: _CompanionSolution,
-    actual: _CompanionSolution,
-) -> None:
-    if expected.object_id != actual.object_id:
-        raise FindOrbFormatError(
-            f"Find_Orb companions disagree on object ID: {expected.object_id!r} != {actual.object_id!r}"
-        )
-
-    string_fields = ("central body", "frame", "reference")
-    for field in string_fields:
-        expected_string = _required_string(
-            expected.elements, field, field=f"{expected.filename}.{field}"
-        )
-        actual_string = _required_string(
-            actual.elements, field, field=f"{actual.filename}.{field}"
-        )
-        if expected_string != actual_string:
-            raise FindOrbFormatError(f"Find_Orb companions disagree on {field!r}")
-
-    numeric_fields = ("epoch", "q", "e", "i", "asc_node", "arg_per", "Tp")
-    for field in numeric_fields:
-        expected_number = _required_float(
-            expected.elements, field, field=f"{expected.filename}.{field}"
-        )
-        actual_number = _required_float(
-            actual.elements, field, field=f"{actual.filename}.{field}"
-        )
-        if not math.isclose(
-            expected_number, actual_number, rel_tol=1e-12, abs_tol=1e-12
-        ):
-            raise FindOrbFormatError(f"Find_Orb companions disagree on {field!r}")
-
-
 def _parse_state_and_covariance(
     covar_path: Path,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float]:
     document = _read_json_object(covar_path)
+    if set(document) != _FIND_ORB_COVARIANCE_FIELDS:
+        raise FindOrbFormatError(
+            "Find_Orb covar.json must contain exactly 'state_vect', 'covar', and 'epoch'"
+        )
     state_values = _sequence(document.get("state_vect"), field="covar.json.state_vect")
+    if len(state_values) != 6:
+        raise FindOrbFormatError(
+            f"Find_Orb state_vect must have shape (6,), got ({len(state_values)},)"
+        )
     state = np.asarray(
         [
             _finite_float(value, field=f"covar.json.state_vect[{index}]")
@@ -300,249 +273,132 @@ def _parse_state_and_covariance(
         dtype=np.float64,
     )
     covariance_rows = _sequence(document.get("covar"), field="covar.json.covar")
-    covariance = np.asarray(
-        [
+    if len(covariance_rows) != 6:
+        raise FindOrbFormatError(
+            f"Find_Orb covariance must have shape (6, 6), got ({len(covariance_rows)}, ...)"
+        )
+    parsed_rows: list[list[float]] = []
+    for row_index, row in enumerate(covariance_rows):
+        row_values = _sequence(row, field=f"covar.json.covar[{row_index}]")
+        if len(row_values) != 6:
+            raise FindOrbFormatError(
+                "Find_Orb covariance must have shape (6, 6), "
+                f"row {row_index} has {len(row_values)} values"
+            )
+        parsed_rows.append(
             [
                 _finite_float(
                     value,
                     field=f"covar.json.covar[{row_index}][{column_index}]",
                 )
-                for column_index, value in enumerate(
-                    _sequence(row, field=f"covar.json.covar[{row_index}]")
-                )
+                for column_index, value in enumerate(row_values)
             ]
-            for row_index, row in enumerate(covariance_rows)
-        ],
-        dtype=np.float64,
-    )
-
-    if state.shape != (6,):
-        raise FindOrbFormatError(
-            f"Find_Orb state_vect must have shape (6,), got {state.shape!r}"
         )
-    if covariance.shape != (6, 6):
-        raise FindOrbFormatError(
-            f"Find_Orb covariance must have shape (6, 6), got {covariance.shape!r}"
-        )
+    covariance = np.asarray(parsed_rows, dtype=np.float64)
     if not np.all(np.isfinite(state)) or not np.all(np.isfinite(covariance)):
         raise FindOrbFormatError(
             "Find_Orb state and covariance must contain only finite values"
         )
 
-    covariance_norm = float(np.linalg.norm(covariance, ord="fro"))
-    asymmetry_norm = float(np.linalg.norm(covariance - covariance.T, ord="fro"))
-    if covariance_norm == 0.0:
+    covariance_scale = float(np.max(np.abs(covariance)))
+    if covariance_scale == 0.0:
         raise FindOrbFormatError("Find_Orb covariance must not be all zero")
+    normalized_covariance = covariance / covariance_scale
+    covariance_norm = float(np.linalg.norm(normalized_covariance, ord="fro"))
+    asymmetry_norm = float(
+        np.linalg.norm(normalized_covariance - normalized_covariance.T, ord="fro")
+    )
     if asymmetry_norm > _COVARIANCE_SYMMETRY_RTOL * covariance_norm:
         raise FindOrbFormatError(
             "Find_Orb covariance is not symmetric within serialization tolerance"
         )
 
-    covariance = (covariance + covariance.T) / 2.0
-    eigenvalues = np.linalg.eigvalsh(covariance)
-    eigenvalue_scale = float(np.max(np.abs(eigenvalues)))
-    psd_tolerance = eigenvalue_scale * 1e-10
-    if float(eigenvalues[0]) < -psd_tolerance:
+    normalized_covariance = (normalized_covariance + normalized_covariance.T) / 2.0
+    try:
+        eigenvalues = np.linalg.eigvalsh(normalized_covariance)
+    except np.linalg.LinAlgError as error:
+        raise FindOrbFormatError(
+            "Find_Orb covariance eigendecomposition did not converge"
+        ) from error
+    if not np.all(np.isfinite(eigenvalues)):
+        raise FindOrbFormatError("Find_Orb covariance eigenvalues must be finite")
+    if float(eigenvalues[0]) < -_COVARIANCE_PSD_RTOL:
         raise FindOrbFormatError("Find_Orb covariance is not positive semidefinite")
+    with np.errstate(over="raise", invalid="raise"):
+        try:
+            covariance = (covariance + covariance.T) / 2.0
+        except FloatingPointError as error:
+            raise FindOrbFormatError(
+                "Find_Orb covariance cannot be symmetrized safely"
+            ) from error
 
     epoch = _required_float(document, "epoch", field="covar.json.epoch")
     return state, covariance, epoch
 
 
-def _angle_difference_degrees(left: float, right: float) -> float:
-    return (left - right + 180.0) % 360.0 - 180.0
-
-
-def _validate_supported_solution(
-    solution: _CompanionSolution,
-) -> tuple[float, str, str, str]:
-    central_body = _required_string(
-        solution.elements,
-        "central body",
-        field=f"{solution.filename}.central body",
-    )
-    if central_body.casefold() not in {"sun", "sol"}:
-        raise FindOrbFormatError(f"Unsupported Find_Orb central body {central_body!r}")
-
-    frame = _required_string(
-        solution.elements, "frame", field=f"{solution.filename}.frame"
-    )
-    if frame.casefold() != "j2000 ecliptic":
-        raise FindOrbFormatError(f"Unsupported Find_Orb element frame {frame!r}")
-
-    reference = _required_string(
-        solution.elements,
-        "reference",
-        field=f"{solution.filename}.reference",
-    )
-    if reference.casefold() != "find_orb":
-        raise FindOrbFormatError(f"Unsupported Find_Orb reference {reference!r}")
-
-    element_epoch = _required_float(
-        solution.elements,
-        "epoch",
-        field=f"{solution.filename}.epoch",
-    )
-    return element_epoch, central_body, frame, reference
-
-
-def _validate_state_matches_elements(
+def _canonical_orbit_id(
     state: npt.NDArray[np.float64],
-    covariance_epoch: float,
-    element_epoch: float,
-    solution: _CompanionSolution,
-) -> None:
-    coordinates = CartesianCoordinates.from_kwargs(
-        x=[float(state[0])],
-        y=[float(state[1])],
-        z=[float(state[2])],
-        vx=[float(state[3])],
-        vy=[float(state[4])],
-        vz=[float(state[5])],
-        time=Timestamp.from_jd([covariance_epoch], scale="tt"),
-        origin=Origin.from_kwargs(code=["SUN"]),
-        frame="ecliptic",
-    )
-    cometary = coordinates.to_cometary()
-    derived = {
-        "q": float(cometary.q[0].as_py()),
-        "e": float(cometary.e[0].as_py()),
-        "i": float(cometary.i[0].as_py()),
-        "asc_node": float(cometary.raan[0].as_py()),
-        "arg_per": float(cometary.ap[0].as_py()),
-    }
-    if not all(math.isfinite(value) for value in derived.values()):
-        raise FindOrbFormatError(
-            "Find_Orb covar.json state produces non-finite orbital invariants"
-        )
-    expected = {
-        key: _required_float(solution.elements, key, field=f"{solution.filename}.{key}")
-        for key in derived
-    }
-
-    epoch_gap_days = abs(element_epoch - covariance_epoch)
-    if epoch_gap_days > _MAX_ELEMENT_EPOCH_GAP_DAYS:
-        raise FindOrbFormatError(
-            "Find_Orb companion epoch is too far from the covariance epoch for "
-            "a safe same-solution consistency check"
-        )
-
-    differences = {
-        "q": abs(derived["q"] - expected["q"]),
-        "e": abs(derived["e"] - expected["e"]),
-        "i": abs(_angle_difference_degrees(derived["i"], expected["i"])),
-    }
-    tolerances = {
-        "q": max(1e-3, 1e-4 * abs(expected["q"])),
-        "e": max(1e-3, 1e-3 * abs(expected["e"])),
-        "i": 0.1 + 0.02 * epoch_gap_days,
-    }
-    angle_tolerance = 0.5 + 0.1 * epoch_gap_days
-    inclination_is_degenerate = (
-        min(
-            abs(derived["i"]),
-            abs(180.0 - derived["i"]),
-            abs(expected["i"]),
-            abs(180.0 - expected["i"]),
-        )
-        < _DEGENERATE_INCLINATION_DEGREES
-    )
-    eccentricity_is_degenerate = (
-        min(derived["e"], expected["e"]) < _DEGENERATE_ECCENTRICITY
-    )
-
-    if inclination_is_degenerate:
-        if not eccentricity_is_degenerate:
-            differences["longitude_perihelion"] = abs(
-                _angle_difference_degrees(
-                    derived["asc_node"] + derived["arg_per"],
-                    expected["asc_node"] + expected["arg_per"],
-                )
-            )
-            tolerances["longitude_perihelion"] = angle_tolerance
-    else:
-        differences["asc_node"] = abs(
-            _angle_difference_degrees(derived["asc_node"], expected["asc_node"])
-        )
-        tolerances["asc_node"] = angle_tolerance
-        if not eccentricity_is_degenerate:
-            differences["arg_per"] = abs(
-                _angle_difference_degrees(derived["arg_per"], expected["arg_per"])
-            )
-            tolerances["arg_per"] = angle_tolerance
-    failures = [
-        field for field in differences if differences[field] > tolerances[field]
-    ]
-    if failures:
-        detail = ", ".join(
-            f"{field} delta={differences[field]:.6g}" for field in failures
-        )
-        raise FindOrbFormatError(
-            "Find_Orb covar.json state is inconsistent with the companion solution: "
-            + detail
-        )
+    covariance: npt.NDArray[np.float64],
+    epoch: float,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(np.asarray(state, dtype="<f8").tobytes(order="C"))
+    digest.update(np.asarray(covariance, dtype="<f8").tobytes(order="C"))
+    digest.update(struct.pack("<d", epoch))
+    return f"find_orb_covar_{digest.hexdigest()[:24]}"
 
 
-def convert_find_orb_bundle(bundle_directory: str | Path) -> FindOrbConversion:
-    """Validate and canonicalize a one-object Find_Orb output bundle.
+def convert_find_orb_covariance(covar_file: str | Path) -> FindOrbConversion:
+    """Validate and canonicalize one modern Find_Orb ``covar.json`` file.
 
-    The canonical state, covariance, and epoch always come from ``covar.json``.
-    Companion elements are a separately propagated representation used to verify
-    identity, supported frame/origin, and gross same-solution consistency. That
-    heuristic is limited to element epochs within 45 days of the covariance epoch,
-    scales angular tolerances with the gap, and avoids singular classical angles.
-    Companion H/G values are retained only as fit provenance.
+    Find_Orb writes Cartesian state in AU and AU/day with a Cartesian covariance
+    ordered x, y, z, vx, vy, vz. The state and covariance share the file's TT
+    epoch and use heliocentric J2000 ecliptic coordinates. This function validates
+    only the supplied numerical product; it does not verify the original fit or
+    infer object identity from another Find_Orb output.
     """
 
-    bundle_path = Path(bundle_directory)
-    if not bundle_path.is_dir():
-        raise FindOrbFormatError("Find_Orb bundle path must be a directory")
-    covar_path = bundle_path / "covar.json"
+    covar_path = Path(covar_file)
     if not covar_path.is_file():
-        raise FindOrbFormatError("Find_Orb bundle requires covar.json")
+        raise FindOrbFormatError("Find_Orb covariance input must be a file")
 
-    primary, companions = _load_companions(bundle_path)
-    element_epoch, central_body, frame, reference = _validate_supported_solution(
-        primary
-    )
     state, covariance, covariance_epoch = _parse_state_and_covariance(covar_path)
-    _validate_state_matches_elements(state, covariance_epoch, element_epoch, primary)
-
-    coordinates = CartesianCoordinates.from_kwargs(
-        x=[float(state[0])],
-        y=[float(state[1])],
-        z=[float(state[2])],
-        vx=[float(state[3])],
-        vy=[float(state[4])],
-        vz=[float(state[5])],
-        time=Timestamp.from_jd([covariance_epoch], scale="tt"),
-        origin=Origin.from_kwargs(code=["SUN"]),
-        frame="ecliptic",
-        covariance=CoordinateCovariances.from_matrix(covariance[np.newaxis, :, :]),
-    )
-    orbits = Orbits.from_kwargs(
-        orbit_id=[primary.object_id],
-        object_id=[primary.object_id],
-        coordinates=coordinates,
-    )
+    try:
+        coordinates = CartesianCoordinates.from_kwargs(
+            x=[float(state[0])],
+            y=[float(state[1])],
+            z=[float(state[2])],
+            vx=[float(state[3])],
+            vy=[float(state[4])],
+            vz=[float(state[5])],
+            time=Timestamp.from_jd([covariance_epoch], scale="tt"),
+            origin=Origin.from_kwargs(code=["SUN"]),
+            frame="ecliptic",
+            covariance=CoordinateCovariances.from_matrix(covariance[np.newaxis, :, :]),
+        )
+        orbits = Orbits.from_kwargs(
+            orbit_id=[_canonical_orbit_id(state, covariance, covariance_epoch)],
+            object_id=[None],
+            coordinates=coordinates,
+        )
+    except Exception as error:
+        logger.warning(
+            "Could not construct ADAM Orbit from Find_Orb covariance: %s", error
+        )
+        raise FindOrbFormatError(
+            "Find_Orb state, covariance, or epoch cannot form an ADAM Orbit"
+        ) from error
     metadata = FindOrbMetadata(
-        object_id=primary.object_id,
-        packed_id=primary.packed_id,
-        companion_file=primary.filename,
-        companion_files=tuple(companion.filename for companion in companions),
+        source_filename=covar_path.name,
         covariance_epoch_jd_tt=covariance_epoch,
-        element_epoch_jd_tt=element_epoch,
-        central_body=central_body,
-        frame=frame,
-        reference=reference,
-        absolute_magnitude=_optional_float(
-            primary.elements, "H", field=f"{primary.filename}.H"
-        ),
-        slope_parameter=_optional_float(
-            primary.elements, "G", field=f"{primary.filename}.G"
-        ),
-        find_orb_version_jd=primary.find_orb_version_jd,
-        consistency_check="epoch_bounded_elements_v2",
+        origin="SUN",
+        frame="ecliptic",
+        time_scale="tt",
+        position_unit="au",
+        velocity_unit="au/day",
+        covariance_order=_COVARIANCE_ORDER,
+        convention_source=_FIND_ORB_CONVENTION_SOURCE,
+        fit_verified=False,
     )
     return FindOrbConversion(orbits=orbits, metadata=metadata)
 
@@ -574,9 +430,45 @@ def read_fo_orbits(input_file: str) -> dict[str, dict[str, object]]:
     return elements_dict
 
 
+def _validate_controlled_solution_conventions(solution: _CompanionSolution) -> None:
+    central_body = _required_string(
+        solution.elements,
+        "central body",
+        field=f"{solution.filename}.central body",
+    )
+    frame = _required_string(
+        solution.elements,
+        "frame",
+        field=f"{solution.filename}.frame",
+    )
+    reference = _required_string(
+        solution.elements,
+        "reference",
+        field=f"{solution.filename}.reference",
+    )
+    if central_body.casefold() not in {"sun", "sol"}:
+        raise FindOrbFormatError(
+            f"Unsupported controlled Find_Orb central body {central_body!r}"
+        )
+    if frame.casefold() != "j2000 ecliptic":
+        raise FindOrbFormatError(f"Unsupported controlled Find_Orb frame {frame!r}")
+    if reference.casefold() != "find_orb":
+        raise FindOrbFormatError(
+            f"Unsupported controlled Find_Orb reference {reference!r}"
+        )
+
+
 def fo_to_adam_orbit_cov(fo_output_folder: str) -> Orbits:
-    """Convert a strict one-object Find_Orb bundle to an ADAM Orbit."""
-    return convert_find_orb_bundle(fo_output_folder).orbits
+    """Convert controlled one-object Find_Orb output to an identified ADAM Orbit."""
+    output_path = Path(fo_output_folder)
+    conversion = convert_find_orb_covariance(output_path / "covar.json")
+    solution = _parse_companion(output_path / "total.json")
+    _validate_controlled_solution_conventions(solution)
+    return Orbits.from_kwargs(
+        orbit_id=[solution.object_id],
+        object_id=[solution.object_id],
+        coordinates=conversion.orbits.coordinates,
+    )
 
 
 def rejected_observations_from_fo(fo_output_folder: str) -> ADESObservations:

@@ -4,8 +4,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from adam_fo import FindOrbFormatError, convert_find_orb_bundle
-from adam_fo.conversions import rejected_observations_from_fo
+from adam_fo import FindOrbFormatError, convert_find_orb_covariance
+from adam_fo.conversions import fo_to_adam_orbit_cov, rejected_observations_from_fo
 
 _STATE = [
     2.32620748805888988,
@@ -65,255 +65,294 @@ _COVARIANCE = [
         5.39319671738e-11,
     ],
 ]
-_ELEMENTS = {
-    "central body": "Sun",
-    "frame": "J2000 ecliptic",
-    "reference": "Find_Orb",
-    "epoch": 2457702.5,
-    "q": 2.9955406006568,
-    "e": 0.0542028586915,
-    "i": 9.7123368192265,
-    "arg_per": 282.6442739845374,
-    "asc_node": 154.3846948448567,
-    "Tp": 2457891.39298828,
-    "H": 17.75,
-    "G": 0.15,
-}
+_EPOCH = 2457696.686981
 
 
-def _write_bundle(
+def _write_covar(
+    path: Path,
+    *,
+    state: list[object] | None = None,
+    covariance: list[object] | None = None,
+    epoch: object = _EPOCH,
+    extra: dict[str, object] | None = None,
+) -> Path:
+    document: dict[str, object] = {
+        "state_vect": _STATE if state is None else state,
+        "covar": _COVARIANCE if covariance is None else covariance,
+        "epoch": epoch,
+    }
+    if extra:
+        document.update(extra)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def _write_total(
     path: Path,
     *,
     object_id: str = "t41f9bb",
     declared_id: str | None = None,
-    state: list[float] | None = None,
-    covariance: list[list[float]] | None = None,
+    observations: dict[str, object] | None = None,
     elements: dict[str, object] | None = None,
-    companion_filename: str = "elem_short.json",
 ) -> None:
-    path.mkdir(parents=True, exist_ok=True)
     declared_id = object_id if declared_id is None else declared_id
-    companion = {
-        "num": 1,
-        "ids": [declared_id],
-        "objects": {
-            object_id: {
-                "object": object_id,
-                "packed": object_id,
-                "Find_Orb_version": 2460673.5,
-                "elements": dict(_ELEMENTS if elements is None else elements),
-            }
+    object_document: dict[str, object] = {
+        "object": object_id,
+        "packed": object_id,
+        "elements": elements
+        or {
+            "central body": "Sun",
+            "frame": "J2000 ecliptic",
+            "reference": "Find_Orb",
         },
     }
-    (path / companion_filename).write_text(json.dumps(companion), encoding="utf-8")
-    covar = {
-        "state_vect": _STATE if state is None else state,
-        "covar": _COVARIANCE if covariance is None else covariance,
-        "epoch": 2457696.686981,
+    if observations is not None:
+        object_document["observations"] = observations
+    document = {
+        "num": 1,
+        "ids": [declared_id],
+        "objects": {object_id: object_document},
     }
-    (path / "covar.json").write_text(json.dumps(covar), encoding="utf-8")
+    path.write_text(json.dumps(document), encoding="utf-8")
 
 
-def test_convert_real_short_arc_pair_preserves_same_epoch_state_and_covariance(
+def test_convert_real_covar_json_preserves_state_covariance_and_exact_epoch(
     tmp_path: Path,
 ) -> None:
-    _write_bundle(tmp_path)
+    path = _write_covar(tmp_path / "covar.json")
 
-    result = convert_find_orb_bundle(tmp_path)
+    result = convert_find_orb_covariance(path)
 
     assert len(result.orbits) == 1
-    assert result.metadata.object_id == "t41f9bb"
-    assert result.metadata.companion_file == "elem_short.json"
-    assert result.metadata.covariance_epoch_jd_tt == 2457696.686981
-    assert result.metadata.element_epoch_jd_tt == 2457702.5
-    assert result.metadata.absolute_magnitude == 17.75
-    assert result.metadata.slope_parameter == 0.15
-    assert result.metadata.consistency_check == "epoch_bounded_elements_v2"
+    assert result.orbits.object_id[0].as_py() is None
+    assert result.metadata.source_filename == "covar.json"
+    assert result.metadata.covariance_epoch_jd_tt == _EPOCH
+    assert result.metadata.origin == "SUN"
+    assert result.metadata.frame == "ecliptic"
+    assert result.metadata.time_scale == "tt"
+    assert result.metadata.position_unit == "au"
+    assert result.metadata.velocity_unit == "au/day"
+    assert result.metadata.covariance_order == ("x", "y", "z", "vx", "vy", "vz")
+    assert "Bill-Gray/find_orb@7e02c585" in result.metadata.convention_source
+    assert result.metadata.fit_verified is False
     np.testing.assert_array_equal(result.orbits.coordinates.values[0], _STATE)
-    assert result.orbits.coordinates.time.jd()[0].as_py() == 2457696.686981
+    assert result.orbits.coordinates.time.jd()[0].as_py() == _EPOCH
     np.testing.assert_array_equal(
         result.orbits.coordinates.covariance.to_matrix()[0],
         (np.asarray(_COVARIANCE) + np.asarray(_COVARIANCE).T) / 2.0,
     )
 
 
-def test_rejects_conflicting_aggregate_identity(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, declared_id="other-object")
+def test_direct_covar_json_does_not_require_or_infer_companion_identity(
+    tmp_path: Path,
+) -> None:
+    path = _write_covar(tmp_path / "covar.json", state=[0.5, *_STATE[1:]])
+
+    result = convert_find_orb_covariance(path)
+
+    assert result.orbits.object_id[0].as_py() is None
+    assert result.orbits.coordinates.x[0].as_py() == 0.5
+
+
+def test_controlled_fo_output_attaches_strict_total_json_identity(
+    tmp_path: Path,
+) -> None:
+    _write_covar(tmp_path / "covar.json")
+    _write_total(tmp_path / "total.json")
+
+    result = fo_to_adam_orbit_cov(str(tmp_path))
+
+    assert result.orbit_id[0].as_py() == "t41f9bb"
+    assert result.object_id[0].as_py() == "t41f9bb"
+
+
+def test_direct_covar_ids_are_deterministic_and_content_derived(tmp_path: Path) -> None:
+    first_path = _write_covar(tmp_path / "first.json")
+    second_path = _write_covar(tmp_path / "second.json")
+
+    first = convert_find_orb_covariance(first_path)
+    first_again = convert_find_orb_covariance(first_path)
+    second = convert_find_orb_covariance(second_path)
+    changed_path = _write_covar(tmp_path / "changed.json", state=[0.5, *_STATE[1:]])
+    changed = convert_find_orb_covariance(changed_path)
+
+    assert first.orbits.orbit_id[0].as_py() == first_again.orbits.orbit_id[0].as_py()
+    assert first.orbits.orbit_id[0].as_py() == second.orbits.orbit_id[0].as_py()
+    assert first.orbits.orbit_id[0].as_py() != changed.orbits.orbit_id[0].as_py()
+
+
+def test_controlled_fo_output_rejects_conflicting_identity(tmp_path: Path) -> None:
+    _write_covar(tmp_path / "covar.json")
+    _write_total(tmp_path / "total.json", declared_id="other-object")
 
     with pytest.raises(FindOrbFormatError, match="declares ID"):
-        convert_find_orb_bundle(tmp_path)
+        fo_to_adam_orbit_cov(str(tmp_path))
 
 
-def test_rejects_stale_covariance_state(tmp_path: Path) -> None:
-    stale_state = list(_STATE)
-    stale_state[0] = 0.5
-    _write_bundle(tmp_path, state=stale_state)
+def test_controlled_fo_output_rejects_unsupported_conventions(tmp_path: Path) -> None:
+    _write_covar(tmp_path / "covar.json")
+    _write_total(
+        tmp_path / "total.json",
+        elements={
+            "central body": "Earth",
+            "frame": "J2000 ecliptic",
+            "reference": "Find_Orb",
+        },
+    )
 
-    with pytest.raises(FindOrbFormatError, match="inconsistent with the companion"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_degenerate_state_with_nonfinite_invariants(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, state=[0.0] * 6)
-
-    with pytest.raises(FindOrbFormatError, match="non-finite orbital invariants"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_boolean_state_values(tmp_path: Path) -> None:
-    state: list[object] = list(_STATE)
-    state[0] = True
-    _write_bundle(tmp_path, state=state)  # type: ignore[arg-type]
-
-    with pytest.raises(FindOrbFormatError, match="must be numeric"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_nonfinite_state(tmp_path: Path) -> None:
-    state = list(_STATE)
-    state[0] = float("nan")
-    _write_bundle(tmp_path, state=state)
-
-    with pytest.raises(FindOrbFormatError, match="must be finite"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_asymmetric_covariance(tmp_path: Path) -> None:
-    covariance = np.asarray(_COVARIANCE)
-    covariance[0, 1] += 1e-4
-    _write_bundle(tmp_path, covariance=covariance.tolist())
-
-    with pytest.raises(FindOrbFormatError, match="not symmetric"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_zero_covariance(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, covariance=np.zeros((6, 6)).tolist())
-
-    with pytest.raises(FindOrbFormatError, match="must not be all zero"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_non_psd_covariance(tmp_path: Path) -> None:
-    covariance = np.eye(6)
-    covariance[0, 0] = -1.0
-    _write_bundle(tmp_path, covariance=covariance.tolist())
-
-    with pytest.raises(FindOrbFormatError, match="positive semidefinite"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_covariance_with_wrong_parameter_count(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, covariance=np.eye(7).tolist())
-
-    with pytest.raises(FindOrbFormatError, match=r"shape \(6, 6\)"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_conflicting_companions(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, companion_filename="elements.json")
-    conflicting = dict(_ELEMENTS)
-    conflicting["epoch"] = 2457703.5
-    _write_bundle(tmp_path, elements=conflicting, companion_filename="total.json")
-
-    with pytest.raises(FindOrbFormatError, match="companions disagree on 'epoch'"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_missing_covariance(tmp_path: Path) -> None:
-    _write_bundle(tmp_path)
-    (tmp_path / "covar.json").unlink()
-
-    with pytest.raises(FindOrbFormatError, match="requires covar.json"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_missing_companion(tmp_path: Path) -> None:
-    _write_bundle(tmp_path)
-    (tmp_path / "elem_short.json").unlink()
-
-    with pytest.raises(FindOrbFormatError, match="requires one companion"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_multiple_companion_objects(tmp_path: Path) -> None:
-    _write_bundle(tmp_path)
-    path = tmp_path / "elem_short.json"
-    companion = json.loads(path.read_text(encoding="utf-8"))
-    companion["objects"]["second"] = companion["objects"]["t41f9bb"]
-    path.write_text(json.dumps(companion), encoding="utf-8")
-
-    with pytest.raises(FindOrbFormatError, match="exactly one object"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_large_element_epoch_gap(tmp_path: Path) -> None:
-    elements = dict(_ELEMENTS)
-    elements["epoch"] = 2457800.5
-    _write_bundle(tmp_path, elements=elements)
-
-    with pytest.raises(FindOrbFormatError, match="epoch is too far"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_unsupported_frame(tmp_path: Path) -> None:
-    elements = dict(_ELEMENTS)
-    elements["frame"] = "J2000 equatorial"
-    _write_bundle(tmp_path, elements=elements)
-
-    with pytest.raises(FindOrbFormatError, match="Unsupported Find_Orb element frame"):
-        convert_find_orb_bundle(tmp_path)
-
-
-def test_rejects_unsupported_central_body_and_reference(tmp_path: Path) -> None:
-    elements = dict(_ELEMENTS)
-    elements["central body"] = "Earth"
-    _write_bundle(tmp_path, elements=elements)
     with pytest.raises(FindOrbFormatError, match="central body"):
-        convert_find_orb_bundle(tmp_path)
-
-    elements["central body"] = "Sun"
-    elements["reference"] = "Other"
-    _write_bundle(tmp_path, elements=elements)
-    with pytest.raises(FindOrbFormatError, match="reference"):
-        convert_find_orb_bundle(tmp_path)
+        fo_to_adam_orbit_cov(str(tmp_path))
 
 
-def test_rejects_non_utf8_json(tmp_path: Path) -> None:
-    _write_bundle(tmp_path)
-    (tmp_path / "elem_short.json").write_bytes(b"\xff\xfe")
+def test_rejects_boolean_and_nonfinite_state_values(tmp_path: Path) -> None:
+    boolean_state: list[object] = list(_STATE)
+    boolean_state[0] = True
+    path = _write_covar(tmp_path / "covar.json", state=boolean_state)
+    with pytest.raises(FindOrbFormatError, match="must be numeric"):
+        convert_find_orb_covariance(path)
+
+    nonfinite_state: list[object] = list(_STATE)
+    nonfinite_state[0] = float("nan")
+    _write_covar(path, state=nonfinite_state)
+    with pytest.raises(FindOrbFormatError, match="must be finite"):
+        convert_find_orb_covariance(path)
+
+    overflowing_integer: list[object] = list(_STATE)
+    overflowing_integer[0] = 10**400
+    _write_covar(path, state=overflowing_integer)
+    with pytest.raises(FindOrbFormatError, match="must be finite"):
+        convert_find_orb_covariance(path)
+
+
+def test_rejects_json_integer_over_interpreter_digit_limit(tmp_path: Path) -> None:
+    path = tmp_path / "covar.json"
+    prefix = json.dumps(
+        {"state_vect": _STATE, "covar": _COVARIANCE},
+        separators=(",", ":"),
+    )[:-1]
+    path.write_text(f'{prefix},"epoch":1{"0" * 5000}}}', encoding="utf-8")
 
     with pytest.raises(FindOrbFormatError, match="Could not read"):
-        convert_find_orb_bundle(tmp_path)
+        convert_find_orb_covariance(path)
 
 
-def test_rejects_oversized_and_deeply_nested_json(
+def test_rejects_invalid_state_and_covariance_shapes(tmp_path: Path) -> None:
+    path = _write_covar(tmp_path / "covar.json", state=_STATE[:-1])
+    with pytest.raises(FindOrbFormatError, match=r"shape \(6,\)"):
+        convert_find_orb_covariance(path)
+
+    _write_covar(path, covariance=np.eye(7).tolist())
+    with pytest.raises(FindOrbFormatError, match=r"shape \(6, 6\)"):
+        convert_find_orb_covariance(path)
+
+    ragged = [list(row) for row in _COVARIANCE]
+    ragged[2] = ragged[2][:-1]
+    _write_covar(path, covariance=ragged)
+    with pytest.raises(FindOrbFormatError, match=r"shape \(6, 6\)"):
+        convert_find_orb_covariance(path)
+
+
+def test_rejects_invalid_covariance_science(tmp_path: Path) -> None:
+    path = _write_covar(tmp_path / "covar.json", covariance=np.zeros((6, 6)).tolist())
+    with pytest.raises(FindOrbFormatError, match="must not be all zero"):
+        convert_find_orb_covariance(path)
+
+    asymmetric = np.asarray(_COVARIANCE)
+    asymmetric[0, 1] += 1e-4
+    _write_covar(path, covariance=asymmetric.tolist())
+    with pytest.raises(FindOrbFormatError, match="not symmetric"):
+        convert_find_orb_covariance(path)
+
+    non_psd = np.eye(6)
+    non_psd[0, 0] = -1.0
+    _write_covar(path, covariance=non_psd.tolist())
+    with pytest.raises(FindOrbFormatError, match="positive semidefinite"):
+        convert_find_orb_covariance(path)
+
+    below_shared_psd_tolerance = np.eye(6)
+    below_shared_psd_tolerance[0, 0] = -2e-10
+    _write_covar(path, covariance=below_shared_psd_tolerance.tolist())
+    with pytest.raises(FindOrbFormatError, match="positive semidefinite"):
+        convert_find_orb_covariance(path)
+
+    within_shared_psd_tolerance = np.eye(6)
+    within_shared_psd_tolerance[0, 0] = -5e-11
+    _write_covar(path, covariance=within_shared_psd_tolerance.tolist())
+    assert len(convert_find_orb_covariance(path).orbits) == 1
+
+
+def test_rejects_nonfinite_epoch_and_non_numeric_covariance(tmp_path: Path) -> None:
+    path = _write_covar(tmp_path / "covar.json", epoch=float("inf"))
+    with pytest.raises(FindOrbFormatError, match="covar.json.epoch.*finite"):
+        convert_find_orb_covariance(path)
+
+    covariance: list[object] = [list(row) for row in _COVARIANCE]
+    first_row = list(covariance[0])
+    first_row[0] = False
+    covariance[0] = first_row
+    _write_covar(path, covariance=covariance)
+    with pytest.raises(FindOrbFormatError, match="must be numeric"):
+        convert_find_orb_covariance(path)
+
+    huge = np.eye(6) * 1e308
+    _write_covar(path, covariance=huge.tolist())
+    with pytest.raises(FindOrbFormatError, match="symmetrized safely"):
+        convert_find_orb_covariance(path)
+
+
+def test_rejects_missing_or_extra_top_level_fields(tmp_path: Path) -> None:
+    path = _write_covar(tmp_path / "covar.json", extra={"object": "hint"})
+    with pytest.raises(FindOrbFormatError, match="must contain exactly"):
+        convert_find_orb_covariance(path)
+
+    path.write_text(
+        json.dumps({"state_vect": _STATE, "epoch": _EPOCH}), encoding="utf-8"
+    )
+    with pytest.raises(FindOrbFormatError, match="must contain exactly"):
+        convert_find_orb_covariance(path)
+
+    path.write_text(
+        '{"state_vect": [], "state_vect": [], "covar": [], "epoch": 1}',
+        encoding="utf-8",
+    )
+    with pytest.raises(FindOrbFormatError, match="duplicate key"):
+        convert_find_orb_covariance(path)
+
+
+def test_rejects_missing_non_utf8_oversized_and_deep_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_bundle(tmp_path)
-    monkeypatch.setattr("adam_fo.conversions._MAX_JSON_BYTES", 10)
-    with pytest.raises(FindOrbFormatError, match="32 MiB limit"):
-        convert_find_orb_bundle(tmp_path)
+    path = tmp_path / "covar.json"
+    with pytest.raises(FindOrbFormatError, match="must be a file"):
+        convert_find_orb_covariance(path)
 
-    monkeypatch.setattr("adam_fo.conversions._MAX_JSON_BYTES", 32 * 1024 * 1024)
-    (tmp_path / "covar.json").write_text("[" * 2000, encoding="utf-8")
+    path.write_bytes(b"\xff\xfe")
     with pytest.raises(FindOrbFormatError, match="Could not read"):
-        convert_find_orb_bundle(tmp_path)
+        convert_find_orb_covariance(path)
+
+    _write_covar(path)
+    monkeypatch.setattr("adam_fo.conversions._MAX_JSON_BYTES", 10)
+    with pytest.raises(FindOrbFormatError, match="1 MiB limit"):
+        convert_find_orb_covariance(path)
+
+    monkeypatch.setattr("adam_fo.conversions._MAX_JSON_BYTES", 1024 * 1024)
+    path.write_text("[" * 2000, encoding="utf-8")
+    with pytest.raises(FindOrbFormatError, match="Could not read"):
+        convert_find_orb_covariance(path)
 
 
 def test_rejected_residual_requires_numeric_astrometry(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, companion_filename="total.json")
-    path = tmp_path / "total.json"
-    total = json.loads(path.read_text(encoding="utf-8"))
-    total["objects"]["t41f9bb"]["observations"] = {"residuals": [{"incl": 0}]}
-    path.write_text(json.dumps(total), encoding="utf-8")
+    _write_total(
+        tmp_path / "total.json",
+        observations={"residuals": [{"incl": 0}]},
+    )
 
     with pytest.raises(FindOrbFormatError, match="residual.JD"):
         rejected_observations_from_fo(str(tmp_path))
 
 
 def test_missing_residual_diagnostics_are_optional(tmp_path: Path) -> None:
-    _write_bundle(tmp_path, companion_filename="total.json")
+    _write_total(tmp_path / "total.json")
 
     rejected = rejected_observations_from_fo(str(tmp_path))
 
