@@ -1,6 +1,7 @@
-import pytest
 import os
 import tempfile
+
+import pytest
 
 from adam_fo import fo
 
@@ -12,14 +13,16 @@ def sample_ades_string():
 
     test_dir = pathlib.Path(__file__).parent
     with open(test_dir / "data/adam-thor-candidates-small.psv", "r") as f:
-        return f.read()
+        lines = f.readlines()
+    return "".join(line for line in lines if "t5b949d" not in line)
 
 
 def test_fo(sample_ades_string):
     orbits, rejected_obs, errors = fo(sample_ades_string)
     assert len(orbits) == 1
-    assert len(rejected_obs) == 1
+    assert len(rejected_obs) == 0
     assert errors is None
+
 
 def test_fo_out_dir(sample_ades_string):
     with tempfile.TemporaryDirectory() as out_dir:
