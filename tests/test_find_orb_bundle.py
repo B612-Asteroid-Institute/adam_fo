@@ -181,6 +181,25 @@ def test_direct_covar_ids_are_deterministic_and_content_derived(tmp_path: Path) 
     assert first.orbits.orbit_id[0].as_py() != changed.orbits.orbit_id[0].as_py()
 
 
+def test_controlled_fo_output_accepts_declared_residual_alias(tmp_path: Path) -> None:
+    _write_covar(tmp_path / "covar.json")
+    _write_total(
+        tmp_path / "total.json",
+        object_id="first-observation",
+        declared_id="first-output-section",
+        observations={
+            "residuals": [
+                {"packed": " first-observation "},
+                {"packed": " first-output-section "},
+            ]
+        },
+    )
+
+    result = fo_to_adam_orbit_cov(str(tmp_path))
+
+    assert result.object_id[0].as_py() == "first-observation"
+
+
 def test_controlled_fo_output_rejects_conflicting_identity(tmp_path: Path) -> None:
     _write_covar(tmp_path / "covar.json")
     _write_total(tmp_path / "total.json", declared_id="other-object")

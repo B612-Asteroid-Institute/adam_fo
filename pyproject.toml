@@ -6,7 +6,7 @@ authors = [
     {name = "Alec Koumjian", email = "alec@b612foundation.org"},
 ]
 dependencies = [
-  "adam-core>=0.3.6",
+  "adam-core>=0.6.1,<0.7",
 ]
 requires-python = "<3.13,>=3.11"
 readme = "README.md"

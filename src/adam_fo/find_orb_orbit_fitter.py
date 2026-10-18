@@ -1,15 +1,14 @@
 import json
 import logging
-from typing import Optional, Tuple
+from typing import Literal
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
-from mpc_obscodes import mpc_obscodes
-
 from adam_core.coordinates.cartesian import CartesianCoordinates
 from adam_core.coordinates.origin import OriginCodes
 from adam_core.coordinates.transform import transform_coordinates
+from adam_core.dynamics.ephemeris import generate_ephemeris_2body
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observations.ades import (
     ADES_to_string,
@@ -19,6 +18,7 @@ from adam_core.observations.ades import (
     SubmitterObsContext,
     TelescopeObsContext,
 )
+from adam_core.observers import Observers
 from adam_core.orbit_determination.evaluate import (
     FittedOrbitMembers,
     FittedOrbits,
@@ -27,7 +27,10 @@ from adam_core.orbit_determination.evaluate import (
 )
 from adam_core.orbit_determination.orbit_fitter import OrbitFitter
 from adam_core.orbits import Orbits
+from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.propagator.propagator import Propagator
+from adam_core.time import Timestamp
+from mpc_obscodes import mpc_obscodes
 
 try:
     from adam_fo import fo
@@ -40,8 +43,68 @@ logger = logging.getLogger(__name__)
 class _TwoBodyPropagator(Propagator):
     """Default propagator used to evaluate hold-in chi2 when none is supplied."""
 
-    def _propagate_orbits(self, orbits, times, max_iter=1000, tol=1e-14, **kwargs):
-        return propagate_2body(orbits, times, max_iter=max_iter, tol=tol)
+    def propagate_orbits(
+        self,
+        orbits: Orbits,
+        times: Timestamp,
+        covariance: bool = False,
+        covariance_method: Literal[
+            "auto", "sigma-point", "monte-carlo"
+        ] = "monte-carlo",
+        num_samples: int = 1000,
+        chunk_size: int = 100,
+        max_processes: int | None = 1,
+        seed: int | None = None,
+        include_nongrav: bool = True,
+    ) -> Orbits:
+        if covariance:
+            raise NotImplementedError(
+                "The default two-body adapter does not implement sampled covariance propagation"
+            )
+        del covariance_method, num_samples, seed
+        return propagate_2body(
+            orbits,
+            times,
+            include_nongrav=include_nongrav,
+            max_processes=max_processes,
+            chunk_size=chunk_size,
+        )
+
+    def generate_ephemeris(
+        self,
+        orbits: Orbits,
+        observers: Observers,
+        covariance: bool = False,
+        covariance_method: Literal[
+            "auto", "sigma-point", "monte-carlo"
+        ] = "monte-carlo",
+        num_samples: int = 1000,
+        chunk_size: int = 100,
+        max_processes: int | None = 1,
+        seed: int | None = None,
+        predict_magnitudes: bool = True,
+        predict_phase_angle: bool = False,
+        include_nongrav: bool = True,
+    ) -> Ephemeris:
+        propagated = self.propagate_orbits(
+            orbits,
+            observers.coordinates.time,
+            covariance=covariance,
+            covariance_method=covariance_method,
+            num_samples=num_samples,
+            chunk_size=chunk_size,
+            max_processes=max_processes,
+            seed=seed,
+            include_nongrav=include_nongrav,
+        )
+        return generate_ephemeris_2body(
+            propagated,
+            observers,
+            predict_magnitudes=predict_magnitudes,
+            predict_phase_angle=predict_phase_angle,
+            max_processes=max_processes,
+            chunk_size=chunk_size,
+        )
 
     def __getstate__(self):
         return self.__dict__.copy()
@@ -58,7 +121,7 @@ class FindOrbOrbitFitter(OrbitFitter):
         *args: object,  # Generic type for arbitrary positional arguments
         fo_result_dir: str,
         clean_up_fo_dir: bool = True,
-        propagator: Optional[Propagator] = None,
+        propagator: Propagator | None = None,
         **kwargs: object,  # Generic type for arbitrary keyword arguments
     ) -> None:
         """
@@ -99,7 +162,7 @@ class FindOrbOrbitFitter(OrbitFitter):
 
     def _observations_to_ades(
         self, observations: OrbitDeterminationObservations
-    ) -> Tuple[str, ADESObservations]:
+    ) -> tuple[str, ADESObservations]:
         """
         Convert OrbitDeterminationObservations to ADES format string.
 
@@ -281,7 +344,10 @@ class FindOrbOrbitFitter(OrbitFitter):
         elif scale == "utc":
             modifier = ",UTC"
         else:
-            modifier = ""
+            # Find_Orb advances past one delimiter after the sixth value. Keep
+            # the default TT scale, but provide that trailing delimiter so its
+            # parser stops on the following NUL byte instead of stepping past it.
+            modifier = ","
 
         return (
             f"{jd:.10f},"
@@ -293,8 +359,8 @@ class FindOrbOrbitFitter(OrbitFitter):
         self,
         object_id: str | pa.LargeStringScalar,
         observations: OrbitDeterminationObservations,
-        reference_orbit: Optional[Orbits] = None,
-    ) -> Tuple[FittedOrbits, FittedOrbitMembers]:
+        reference_orbit: Orbits | None = None,
+    ) -> tuple[FittedOrbits, FittedOrbitMembers]:
         """Fit an initial orbit for a single object via Find_Orb.
 
         Returns a real ``FittedOrbits`` table with ``reduced_chi2`` populated by
