@@ -187,6 +187,33 @@ def _optional_string(
     return parsed
 
 
+def _declared_id_is_residual_alias(
+    object_document: Mapping[str, object],
+    declared_id: str,
+    object_id: str,
+    *,
+    field: str,
+) -> bool:
+    """Return whether Find_Orb used another observation ID for the same object."""
+    raw_observations = object_document.get("observations")
+    if raw_observations is None:
+        return False
+    observations = _mapping(raw_observations, field=f"{field}.observations")
+    raw_residuals = observations.get("residuals")
+    if raw_residuals is None:
+        return False
+    residuals = _sequence(raw_residuals, field=f"{field}.observations.residuals")
+    residual_ids = {
+        _required_string(
+            _mapping(residual, field=f"{field}.observations.residuals[]"),
+            "packed",
+            field=f"{field}.observations.residuals[].packed",
+        )
+        for residual in residuals
+    }
+    return declared_id in residual_ids and object_id in residual_ids
+
+
 def _parse_companion(path: Path) -> _CompanionSolution:
     document = _read_json_object(path)
     num = document.get("num")
@@ -215,12 +242,18 @@ def _parse_companion(path: Path) -> _CompanionSolution:
         raise FindOrbFormatError(
             f"Find_Orb companion {path.name!r} has an invalid object key"
         )
-    if declared_id != object_id:
+    object_field = f"{path.name}.objects.{object_id}"
+    object_document = _mapping(raw_object, field=object_field)
+    if declared_id != object_id and not _declared_id_is_residual_alias(
+        object_document,
+        declared_id,
+        object_id,
+        field=object_field,
+    ):
         raise FindOrbFormatError(
             f"Find_Orb companion {path.name!r} declares ID {declared_id!r} but contains {object_id!r}"
         )
 
-    object_document = _mapping(raw_object, field=f"{path.name}.objects.{object_id}")
     reported_object = _required_string(
         object_document,
         "object",
